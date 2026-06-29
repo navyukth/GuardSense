@@ -29,7 +29,7 @@ class TrackManager:
                 self.tracks[track_id] = {
                     "track_id": track_id,
                     "age": 0,
-                    "stable": True,
+                    "stable": False,
                     "identified": False,
                     "person_id": None,
                     "last_seen": current_time

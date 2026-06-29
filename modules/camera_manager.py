@@ -68,12 +68,27 @@ class CameraManager:
 
         frames = {}
 
+        events = []
+
         for camera_id, worker in self.workers.items():
 
-            frame = worker.update()
+            result = worker.update()
 
-            if frame is not None:
+            if result is None:
+                continue
 
-                frames[camera_id] = frame
+            if result["frame"] is not None:
 
-        return frames
+                frames[camera_id] = result["frame"]
+
+            events.extend(
+                result["events"]
+            )
+
+        return {
+
+            "frames": frames,
+
+            "events": events
+
+        }

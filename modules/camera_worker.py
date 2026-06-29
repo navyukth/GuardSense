@@ -56,9 +56,14 @@ class CameraWorker:
         frame = self.camera.read()
 
         if frame is None:
-            return None
+            return {
+                "frame": None,
+                "events": []
+            }
 
         self.frame_count += 1
+
+        events = []
 
         ####################################################
         # Detection
@@ -78,6 +83,10 @@ class CameraWorker:
 
             self.embedding_filter.clear(
                 track["track_id"]
+            )
+
+            events.append(
+                f"Camera {self.camera_id}: Track {track['track_id']} Lost"
             )
 
         ####################################################
@@ -110,6 +119,8 @@ class CameraWorker:
                     track["track_id"]
                 )
 
+                old_person = track.get("person_id")
+
                 person_id = self.identity_manager.identify(
                     embeddings
                 )
@@ -121,6 +132,12 @@ class CameraWorker:
                         person_id
                     )
 
+                    if old_person != person_id:
+
+                        events.append(
+                            f"Camera {self.camera_id}: Person {person_id} identified"
+                        )
+
         ####################################################
         # Draw
         ####################################################
@@ -130,4 +147,7 @@ class CameraWorker:
             state["people"]
         )
 
-        return frame
+        return {
+            "frame": frame,
+            "events": events
+        }
