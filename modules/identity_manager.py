@@ -1,7 +1,7 @@
 import time
 
 class IdentityManager:
-    def __init__(self,osnet,similarity_threshold=0.82):
+    def __init__(self,osnet,similarity_threshold=0.65):
         self.osnet = osnet
         self.threshold = similarity_threshold
 
@@ -63,7 +63,7 @@ class IdentityManager:
         # Candidate Zone
         ####################################################
 
-        if best_score >= 0.70:
+        if best_score >= 0.60:
             print("Candidate Match - Waiting for more embeddings...")
 
             print("--------------------------------")
