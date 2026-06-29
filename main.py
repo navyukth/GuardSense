@@ -1,129 +1,48 @@
 import cv2
-import time
 
-from modules.camera import Camera
-from modules.tracker import Tracker
-from modules.track_manager import TrackManager
-from modules.osnet import OSNet
-from modules.embedding_filter import EmbeddingFilter
-from modules.identity_manager import IdentityManager
-from modules.renderer import Renderer
+from modules.camera_manager import CameraManager
 
 
-RTSP_URL = (
-    "rtsp://admin:admin%401234@192.168.0.140:554/"
-    "cam/realmonitor?channel=3&subtype=0"
-)
+CAMERAS = {
 
-EMBEDDING_INTERVAL = 10      # Every 10 frames
+    1: "rtsp://admin:admin%401234@192.168.0.140:554/cam/realmonitor?channel=1&subtype=0",
+
+    2: "rtsp://admin:admin%401234@192.168.0.140:554/cam/realmonitor?channel=2&subtype=0",
+
+    3: "rtsp://admin:admin%401234@192.168.0.140:554/cam/realmonitor?channel=3&subtype=0",
+
+    4: "rtsp://admin:admin%401234@192.168.0.140:554/cam/realmonitor?channel=4&subtype=0",
+
+}
 
 
 def main():
 
-    camera = Camera(RTSP_URL)
-    camera.start()
+    manager = CameraManager(CAMERAS)
 
-    tracker = Tracker()
+    manager.start()
 
-    track_manager = TrackManager()
+    try:
 
-    osnet = OSNet()
+        while True:
 
-    embedding_filter = EmbeddingFilter(osnet)
+            frames = manager.update()
 
-    identity_manager = IdentityManager(osnet)
+            for camera_id, frame in frames.items():
 
-    frame_count = 0
-
-    while True:
-
-        frame = camera.read()
-
-        if frame is None:
-            continue
-
-        frame_count += 1
-
-        ####################################################
-        # Detection + Tracking
-        ####################################################
-
-        people = tracker.track(frame)
-
-        state = track_manager.update(people)
-
-        ####################################################
-        # Remove Lost Tracks
-        ####################################################
-
-        for track in state["lost_tracks"]:
-
-            embedding_filter.clear(
-                track["track_id"]
-            )
-
-        ####################################################
-        # Re-Identification
-        ####################################################
-
-        if frame_count % EMBEDDING_INTERVAL == 0:
-
-            for person in state["people"]:
-
-                track = person["track"]
-
-                if not track["stable"]:
-                    continue
-
-                embedding = osnet.extract(
-                    frame,
-                    person["bbox"]
+                cv2.imshow(
+                    f"Camera {camera_id}",
+                    frame
                 )
 
-                accepted = embedding_filter.add(
-                    track["track_id"],
-                    embedding
-                )
+            if cv2.waitKey(1) == ord("q"):
+                break
 
-                if not accepted:
-                    continue
+    finally:
 
-                embeddings = embedding_filter.get(
-                    track["track_id"]
-                )
+        manager.stop()
 
-                person_id = identity_manager.identify(
-                    embeddings
-                )
-
-                if person_id is not None:
-                    track_manager.set_person(
-                        track["track_id"],
-                        person_id
-                    )
-
-        ####################################################
-        # Draw
-        ####################################################
-
-        frame = Renderer.draw(
-            frame,
-            state["people"]
-        )
-
-        cv2.imshow(
-            "GuardSense",
-            frame
-        )
-
-        key = cv2.waitKey(1)
-
-        if key == ord("q"):
-            break
-
-    camera.stop()
-
-    cv2.destroyAllWindows()
+        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
