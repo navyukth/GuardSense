@@ -1,4 +1,4 @@
-from CameraManager import CameraManager
+from Camera.CameraManager import CameraManager
 import cv2
 
 camera_Manager = CameraManager()

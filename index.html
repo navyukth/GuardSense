@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>GuardSense</title>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+</head>
+<body>
+
+<video id="video" controls autoplay muted width="900"></video>
+
+<script>
+const video = document.getElementById("video");
+// const stream ="https://live.navyukth.tech/LiveApp/streams/frontdoor.m3u8";
+const stream = "http://100.99.16.59:5080/LiveApp/streams/frontdoor.m3u8"
+
+if (Hls.isSupported()) {
+    const hls = new Hls();
+    hls.loadSource(stream);
+    hls.attachMedia(video);
+} else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+    video.src = stream;
+}
+</script>
+
+</body>
+</html>

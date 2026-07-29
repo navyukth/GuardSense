@@ -102,3 +102,9 @@ htmlcov/
 *.bak
 *.swp
 *.swo
+
+# -----------------------------
+# OtherStuff
+# -----------------------------
+sample-imgs/
+yolov8n.pt
