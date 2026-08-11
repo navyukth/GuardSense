@@ -13,10 +13,18 @@ class Detection:
     bbox: tuple[int, int, int, int]
     class_id: int
     confidence: float
-    
-
 
 @dataclass
 class DetectionResult:
     frame:Frame
     detections: list[Detection]
+
+@dataclass
+class Track:
+    track_id : int
+    detection : Detection
+
+@dataclass
+class TrackingResult:
+    frame : Frame
+    tracks : list[Track]
