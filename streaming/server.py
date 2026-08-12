@@ -1,8 +1,10 @@
 import asyncio
+import os
 
 import cv2
 import time
 from aiohttp import web
+from dotenv import load_dotenv
 
 from aiortc import (
     RTCPeerConnection,
@@ -18,6 +20,15 @@ from streaming.guardsense_pipeline import GuardSensePipeline
 
 
 # =========================================================
+# Environment
+# =========================================================
+
+load_dotenv()
+
+TURN_USERNAME = os.environ["TURN_USERNAME"]
+TURN_CREDENTIAL = os.environ["TURN_CREDENTIAL"]
+
+# =========================================================
 # GuardSense Pipeline
 # =========================================================
 
@@ -27,18 +38,34 @@ pcs = set()
 
 
 # =========================================================
-# STUN / ICE Configuration
+# STUN / TURN ICE Configuration (Metered.ca)
 # =========================================================
 
 ICE_CONFIG = RTCConfiguration(
     iceServers=[
+        RTCIceServer(urls="stun:stun.relay.metered.ca:80"),
         RTCIceServer(
-            urls="stun:stun.l.google.com:19302"
-        )
+            urls="turn:global.relay.metered.ca:80",
+            username=TURN_USERNAME,
+            credential=TURN_CREDENTIAL,
+        ),
+        RTCIceServer(
+            urls="turn:global.relay.metered.ca:80?transport=tcp",
+            username=TURN_USERNAME,
+            credential=TURN_CREDENTIAL,
+        ),
+        RTCIceServer(
+            urls="turn:global.relay.metered.ca:443",
+            username=TURN_USERNAME,
+            credential=TURN_CREDENTIAL,
+        ),
+        RTCIceServer(
+            urls="turns:global.relay.metered.ca:443?transport=tcp",
+            username=TURN_USERNAME,
+            credential=TURN_CREDENTIAL,
+        ),
     ]
 )
-
-
 # =========================================================
 # WebRTC Video Track
 # =========================================================
@@ -90,10 +117,10 @@ class GuardSenseVideoTrack(VideoStreamTrack):
 
 
 # =========================================================
-# HTML
+# HTML (template — TURN credentials injected at request time)
 # =========================================================
 
-HTML = """
+HTML_TEMPLATE = """
 <!DOCTYPE html>
 
 <html>
@@ -221,14 +248,31 @@ async function start() {
     // =====================================================
 
     const pc = new RTCPeerConnection({
-
         iceServers: [
             {
-                urls:
-                    "stun:stun.l.google.com:19302"
-            }
-        ]
-
+                urls: "stun:stun.relay.metered.ca:80",
+            },
+            {
+                urls: "turn:global.relay.metered.ca:80",
+                username: "__TURN_USERNAME__",
+                credential: "__TURN_CREDENTIAL__",
+            },
+            {
+                urls: "turn:global.relay.metered.ca:80?transport=tcp",
+                username: "__TURN_USERNAME__",
+                credential: "__TURN_CREDENTIAL__",
+            },
+            {
+                urls: "turn:global.relay.metered.ca:443",
+                username: "__TURN_USERNAME__",
+                credential: "__TURN_CREDENTIAL__",
+            },
+            {
+                urls: "turns:global.relay.metered.ca:443?transport=tcp",
+                username: "__TURN_USERNAME__",
+                credential: "__TURN_CREDENTIAL__",
+            },
+        ],
     });
 
 
@@ -507,6 +551,18 @@ start();
 """
 
 
+def render_html():
+    """
+    Injects TURN credentials into the HTML template at request time,
+    so they never sit hardcoded in source.
+    """
+    return (
+        HTML_TEMPLATE
+        .replace("__TURN_USERNAME__", TURN_USERNAME)
+        .replace("__TURN_CREDENTIAL__", TURN_CREDENTIAL)
+    )
+
+
 # =========================================================
 # HTTP Routes
 # =========================================================
@@ -519,7 +575,7 @@ async def index(request):
     print("======================================")
 
     return web.Response(
-        text=HTML,
+        text=render_html(),
         content_type="text/html"
     )
 
