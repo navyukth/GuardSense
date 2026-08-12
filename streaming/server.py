@@ -8,56 +8,75 @@ from aiortc import (
     RTCPeerConnection,
     RTCSessionDescription,
     VideoStreamTrack,
+    RTCConfiguration,
+    RTCIceServer,
 )
 
 from av import VideoFrame
 
-from streaming.guardsense_pipeline import (
-    GuardSensePipeline
-)
+from streaming.guardsense_pipeline import GuardSensePipeline
 
 
-# ---------------------------------------------------------
-# GuardSense
-# ---------------------------------------------------------
+# =========================================================
+# GuardSense Pipeline
+# =========================================================
 
 pipeline = GuardSensePipeline()
 
 pcs = set()
 
 
-# ---------------------------------------------------------
-# WebRTC Track
-# ---------------------------------------------------------
+# =========================================================
+# STUN / ICE Configuration
+# =========================================================
+
+ICE_CONFIG = RTCConfiguration(
+    iceServers=[
+        RTCIceServer(
+            urls="stun:stun.l.google.com:19302"
+        )
+    ]
+)
+
+
+# =========================================================
+# WebRTC Video Track
+# =========================================================
 
 class GuardSenseVideoTrack(VideoStreamTrack):
 
     def __init__(self, pipeline):
-
         super().__init__()
 
         self.pipeline = pipeline
 
     async def recv(self):
 
+        # WebRTC timestamp
         pts, time_base = await self.next_timestamp()
 
         frame = None
 
-        # Wait until GuardSense produces a frame
+        # Wait until GuardSense has produced a frame
         while frame is None:
 
             frame = self.pipeline.get_latest_frame()
 
             if frame is None:
-
                 await asyncio.sleep(0.01)
 
+        # -------------------------------------------------
         # OpenCV BGR -> RGB
+        # -------------------------------------------------
+
         frame = cv2.cvtColor(
             frame,
             cv2.COLOR_BGR2RGB
         )
+
+        # -------------------------------------------------
+        # OpenCV -> PyAV
+        # -------------------------------------------------
 
         video_frame = VideoFrame.from_ndarray(
             frame,
@@ -70,9 +89,9 @@ class GuardSenseVideoTrack(VideoStreamTrack):
         return video_frame
 
 
-# ---------------------------------------------------------
+# =========================================================
 # HTML
-# ---------------------------------------------------------
+# =========================================================
 
 HTML = """
 <!DOCTYPE html>
@@ -83,6 +102,9 @@ HTML = """
 
 <meta charset="UTF-8">
 
+<meta name="viewport"
+      content="width=device-width, initial-scale=1.0">
+
 <title>GuardSense Live</title>
 
 <style>
@@ -91,12 +113,17 @@ body {
     margin: 0;
     background: #111;
     color: white;
-    font-family: Arial;
+    font-family: Arial, sans-serif;
     text-align: center;
 }
 
 h1 {
     margin: 20px;
+}
+
+#status {
+    margin: 10px;
+    font-size: 16px;
 }
 
 video {
@@ -125,16 +152,31 @@ video {
     controls>
 </video>
 
+
 <script>
+
 async function start() {
+
+    console.log("Starting GuardSense WebRTC...");
+
+    const status =
+        document.getElementById("status");
+
+    const video =
+        document.getElementById("video");
+
+
+    // =====================================================
+    // WebRTC Peer Connection
+    // =====================================================
 
     const pc = new RTCPeerConnection();
 
-    const video = document.getElementById("video");
 
-    // -----------------------------
-    // WebRTC diagnostics
-    // -----------------------------
+    // =====================================================
+    // Connection State
+    // =====================================================
+
     pc.onconnectionstatechange = () => {
 
         console.log(
@@ -142,10 +184,15 @@ async function start() {
             pc.connectionState
         );
 
-        document.getElementById("status").innerText =
-            "Connection: " + pc.connectionState;
+        status.innerText =
+            "Connection: " +
+            pc.connectionState;
     };
 
+
+    // =====================================================
+    // ICE Connection State
+    // =====================================================
 
     pc.oniceconnectionstatechange = () => {
 
@@ -154,10 +201,15 @@ async function start() {
             pc.iceConnectionState
         );
 
-        document.getElementById("status").innerText =   
-            "ICE: " + pc.iceConnectionState;
+        status.innerText =
+            "ICE: " +
+            pc.iceConnectionState;
     };
 
+
+    // =====================================================
+    // ICE Gathering State
+    // =====================================================
 
     pc.onicegatheringstatechange = () => {
 
@@ -167,6 +219,33 @@ async function start() {
         );
     };
 
+
+    // =====================================================
+    // ICE Candidate
+    // =====================================================
+
+    pc.onicecandidate = (event) => {
+
+        if (event.candidate) {
+
+            console.log(
+                "ICE candidate:",
+                event.candidate.candidate
+            );
+
+        } else {
+
+            console.log(
+                "ICE candidate gathering complete"
+            );
+        }
+    };
+
+
+    // =====================================================
+    // WebRTC Track
+    // =====================================================
+
     pc.ontrack = async (event) => {
 
         console.log(
@@ -174,17 +253,28 @@ async function start() {
             event.track.kind
         );
 
-        // Attach the actual track directly
-        const stream = new MediaStream();
 
-        stream.addTrack(event.track);
+        const stream =
+            new MediaStream();
 
-        video.srcObject = stream;
+        stream.addTrack(
+            event.track
+        );
+
+        video.srcObject =
+            stream;
+
 
         try {
+
             await video.play();
-            console.log("Video playback started");
+
+            console.log(
+                "Video playback started"
+            );
+
         } catch (error) {
+
             console.error(
                 "Video play failed:",
                 error
@@ -192,7 +282,11 @@ async function start() {
         }
     };
 
-    // We want to RECEIVE video
+
+    // =====================================================
+    // Receive Video
+    // =====================================================
+
     pc.addTransceiver(
         "video",
         {
@@ -200,41 +294,52 @@ async function start() {
         }
     );
 
-    // -----------------------------
-    // Create offer
-    // -----------------------------
 
-    const offer = await pc.createOffer();
+    // =====================================================
+    // Create Offer
+    // =====================================================
 
-    await pc.setLocalDescription(offer);
+    const offer =
+        await pc.createOffer();
+
+
+    await pc.setLocalDescription(
+        offer
+    );
+
 
     console.log(
         "Local SDP created"
     );
 
-    // -----------------------------
-    // Send offer to Python
-    // -----------------------------
 
-    const response = await fetch(
-        "/offer",
-        {
-            method: "POST",
+    // =====================================================
+    // Send Offer to GuardSense
+    // =====================================================
 
-            headers: {
-                "Content-Type":
-                    "application/json"
-            },
+    const response =
+        await fetch(
+            "/offer",
+            {
+                method: "POST",
 
-            body: JSON.stringify({
-                sdp:
-                    pc.localDescription.sdp,
+                headers: {
+                    "Content-Type":
+                        "application/json"
+                },
 
-                type:
-                    pc.localDescription.type
-            })
-        }
-    );
+                body: JSON.stringify({
+
+                    sdp:
+                        pc.localDescription.sdp,
+
+                    type:
+                        pc.localDescription.type
+
+                })
+            }
+        );
+
 
     if (!response.ok) {
 
@@ -243,29 +348,44 @@ async function start() {
             response.status
         );
 
+        status.innerText =
+            "Offer failed: " +
+            response.status;
+
         return;
     }
 
-    const answer = await response.json();
+
+    // =====================================================
+    // Receive Answer
+    // =====================================================
+
+    const answer =
+        await response.json();
+
 
     console.log(
         "Received WebRTC answer"
     );
 
-    // -----------------------------
-    // Set answer
-    // -----------------------------
+
+    // =====================================================
+    // Set Remote Description
+    // =====================================================
 
     await pc.setRemoteDescription(
         answer
     );
+
 
     console.log(
         "Remote description set"
     );
 }
 
+
 start();
+
 </script>
 
 </body>
@@ -274,9 +394,9 @@ start();
 """
 
 
-# ---------------------------------------------------------
-# Routes
-# ---------------------------------------------------------
+# =========================================================
+# HTTP Routes
+# =========================================================
 
 async def index(request):
 
@@ -286,22 +406,42 @@ async def index(request):
     )
 
 
+# =========================================================
+# WebRTC Offer
+# =========================================================
+
 async def offer(request):
 
     params = await request.json()
+
 
     offer = RTCSessionDescription(
         sdp=params["sdp"],
         type=params["type"]
     )
 
-    pc = RTCPeerConnection()
+
+    # -----------------------------------------------------
+    # Create WebRTC Peer Connection
+    # -----------------------------------------------------
+
+    pc = RTCPeerConnection(
+        configuration=ICE_CONFIG
+    )
+
 
     pcs.add(pc)
 
-    print(
-        "New WebRTC connection"
-    )
+
+    print()
+    print("======================================")
+    print("New WebRTC connection")
+    print("======================================")
+
+
+    # =====================================================
+    # Connection State
+    # =====================================================
 
     @pc.on("connectionstatechange")
     async def on_connectionstatechange():
@@ -310,6 +450,7 @@ async def offer(request):
             "WebRTC state:",
             pc.connectionState
         )
+
 
         if pc.connectionState in (
             "failed",
@@ -320,21 +461,74 @@ async def offer(request):
 
             pcs.discard(pc)
 
+
+    # =====================================================
+    # ICE Connection State
+    # =====================================================
+
+    @pc.on("iceconnectionstatechange")
+    async def on_iceconnectionstatechange():
+
+        print(
+            "ICE state:",
+            pc.iceConnectionState
+        )
+
+
+    # =====================================================
+    # ICE Gathering State
+    # =====================================================
+
+    @pc.on("icegatheringstatechange")
+    async def on_icegatheringstatechange():
+
+        print(
+            "ICE gathering state:",
+            pc.iceGatheringState
+        )
+
+
+    # =====================================================
+    # Add GuardSense Video Track
+    # =====================================================
+
     track = GuardSenseVideoTrack(
         pipeline
     )
 
+
     pc.addTrack(track)
+
+
+    # =====================================================
+    # Receive Browser Offer
+    # =====================================================
 
     await pc.setRemoteDescription(
         offer
     )
 
+
+    # =====================================================
+    # Create Answer
+    # =====================================================
+
     answer = await pc.createAnswer()
+
 
     await pc.setLocalDescription(
         answer
     )
+
+
+    print(
+        "Local WebRTC answer created"
+    )
+
+
+    # =====================================================
+    # Return Answer
+    # =====================================================
 
     return web.json_response(
         {
@@ -347,18 +541,21 @@ async def offer(request):
     )
 
 
-# ---------------------------------------------------------
+# =========================================================
 # Shutdown
-# ---------------------------------------------------------
+# =========================================================
 
 async def shutdown(app):
 
-    print(
-        "Shutting down..."
-    )
+    print()
+    print("Shutting down GuardSense...")
 
+
+    # Stop pipeline
     pipeline.stop()
 
+
+    # Close WebRTC connections
     await asyncio.gather(
         *[
             pc.close()
@@ -367,38 +564,56 @@ async def shutdown(app):
         return_exceptions=True
     )
 
+
     pcs.clear()
 
 
-# ---------------------------------------------------------
-# App
-# ---------------------------------------------------------
+    print(
+        "GuardSense stopped"
+    )
+
+
+# =========================================================
+# AIOHTTP Application
+# =========================================================
 
 app = web.Application()
+
 
 app.router.add_get(
     "/",
     index
 )
 
+
 app.router.add_post(
     "/offer",
     offer
 )
+
 
 app.on_shutdown.append(
     shutdown
 )
 
 
-# ---------------------------------------------------------
+# =========================================================
 # Main
-# ---------------------------------------------------------
+# =========================================================
 
 if __name__ == "__main__":
 
+    print()
+    print("======================================")
+    print("Starting GuardSense")
+    print("======================================")
+
+
+    # Start camera + YOLO + ByteTrack
     pipeline.start()
 
+
+    # Start HTTP + WebRTC server
     web.run_app(
         app,
         host="0.0.0.0",

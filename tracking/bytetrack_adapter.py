@@ -64,9 +64,9 @@ class ByteTrackAdapter(Tracker):
         )
 
 
-        print("BYTE TRACK OUTPUT:")
-        print(output)
-        print("SHAPE:", output.shape)
+        # print("BYTE TRACK OUTPUT:")
+        # print(output)
+        # print("SHAPE:", output.shape)
 
         tracks = []
 

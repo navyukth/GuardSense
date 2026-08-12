@@ -16,7 +16,12 @@ class YOLODetector(Detector):
 
         img = frame.frame
 
-        model_output = self.model.predict(source=img, classes=[0],conf = self.confidence)
+        model_output = self.model.predict(
+            source=img,
+            classes=[0],
+            conf = self.confidence,
+            verbose=False
+            )
 
         for prediction in model_output:
             boxes = prediction.boxes
