@@ -1,3 +1,4 @@
+import os
 import threading
 import time
 
@@ -7,7 +8,11 @@ from camera.CameraManager import CameraManager
 from DataClass.types import Frame
 from detection.yolo_detector import YOLODetector
 from tracking.bytetrack_adapter import ByteTrackAdapter
+from dotenv import load_dotenv
 
+load_dotenv()
+
+RTSP_URL = os.environ["RTSP_URL"]
 
 class GuardSensePipeline:
 
@@ -17,8 +22,7 @@ class GuardSensePipeline:
 
         self.camera_manager.add_cam(
             "front_door",
-            "rtsp://admin:admin%401234@192.168.0.140:554/"
-            "cam/realmonitor?channel=3&subtype=0"
+            RTSP_URL
         )
 
         self.detector = YOLODetector(

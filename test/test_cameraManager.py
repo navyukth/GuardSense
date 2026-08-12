@@ -1,23 +1,31 @@
 from Camera.CameraManager import CameraManager
 import cv2
+import os
+import threading
+import time
+
+
+load_dotenv()
+
+RTSP_URL = os.environ["RTSP_URL"]
 
 camera_Manager = CameraManager()
 
 camera_Manager.add_cam(
     "front_gate",
-    "rtsp://admin:admin%401234@192.168.0.141:554/cam/realmonitor?channel=1&subtype=1"
+    RTSP_URL
 )
 camera_Manager.add_cam(
     "side_gate",
-    "rtsp://admin:admin%401234@192.168.0.141:554/cam/realmonitor?channel=2&subtype=1"
+    RTSP_URL
 )
 camera_Manager.add_cam(
     "front_door",
-    "rtsp://admin:admin%401234@192.168.0.141:554/cam/realmonitor?channel=3&subtype=1"
+    RTSP_URL
 )
 camera_Manager.add_cam(
     "top",
-    "rtsp://admin:admin%401234@192.168.0.141:554/cam/realmonitor?channel=4&subtype=1"
+    RTSP_URL
 )
 
 
