@@ -5,29 +5,29 @@ from tracking.bytetrack_adapter import ByteTrackAdapter
 
 from streaming.rtmp_publisher import RTMPPublisher
 
+import os
+import threading
 import time
+
 import cv2
 
 camera_Manager = CameraManager()
 
 camera_Manager.add_cam(
     "front_gate",
-    "rtsp://admin:admin%401234@192.168.0.140:554/cam/realmonitor?channel=1&subtype=0"
+    RTSP_URL
 )
-
 camera_Manager.add_cam(
     "side_gate",
-    "rtsp://admin:admin%401234@192.168.0.140:554/cam/realmonitor?channel=2&subtype=0"
+    RTSP_URL
 )
-
 camera_Manager.add_cam(
     "front_door",
-    "rtsp://admin:admin%401234@192.168.0.140:554/cam/realmonitor?channel=3&subtype=0"
+    RTSP_URL
 )
-
 camera_Manager.add_cam(
     "top",
-    "rtsp://admin:admin%401234@192.168.0.140:554/cam/realmonitor?channel=4&subtype=0"
+    RTSP_URL
 )
 
 detector = YOLODetector(
