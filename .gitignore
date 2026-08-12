@@ -108,3 +108,8 @@ htmlcov/
 # -----------------------------
 sample-imgs/
 yolov8n.pt
+
+# -----------------------------
+# Project notes (local context, not for git)
+# -----------------------------
+guardsense.md

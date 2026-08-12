@@ -1,7 +1,7 @@
 import asyncio
 
 import cv2
-
+import time
 from aiohttp import web
 
 from aiortc import (
@@ -155,9 +155,59 @@ video {
 
 <script>
 
+async function waitForIceGatheringComplete(pc) {
+
+    console.log(
+        "Waiting for ICE gathering to complete..."
+    );
+
+    if (pc.iceGatheringState === "complete") {
+
+        console.log(
+            "ICE gathering already complete"
+        );
+
+        return;
+    }
+
+    await new Promise((resolve) => {
+
+        const checkState = () => {
+
+            console.log(
+                "ICE gathering state:",
+                pc.iceGatheringState
+            );
+
+            if (pc.iceGatheringState === "complete") {
+
+                pc.removeEventListener(
+                    "icegatheringstatechange",
+                    checkState
+                );
+
+                resolve();
+            }
+        };
+
+        pc.addEventListener(
+            "icegatheringstatechange",
+            checkState
+        );
+
+    });
+
+    console.log(
+        "ICE gathering completed"
+    );
+}
+
+
 async function start() {
 
-    console.log("Starting GuardSense WebRTC...");
+    console.log("======================================");
+    console.log("Starting GuardSense WebRTC");
+    console.log("======================================");
 
     const status =
         document.getElementById("status");
@@ -170,7 +220,16 @@ async function start() {
     // WebRTC Peer Connection
     // =====================================================
 
-    const pc = new RTCPeerConnection();
+    const pc = new RTCPeerConnection({
+
+        iceServers: [
+            {
+                urls:
+                    "stun:stun.l.google.com:19302"
+            }
+        ]
+
+    });
 
 
     // =====================================================
@@ -180,7 +239,7 @@ async function start() {
     pc.onconnectionstatechange = () => {
 
         console.log(
-            "Connection state:",
+            "WEBRTC CONNECTION STATE:",
             pc.connectionState
         );
 
@@ -197,7 +256,7 @@ async function start() {
     pc.oniceconnectionstatechange = () => {
 
         console.log(
-            "ICE state:",
+            "ICE CONNECTION STATE:",
             pc.iceConnectionState
         );
 
@@ -214,7 +273,7 @@ async function start() {
     pc.onicegatheringstatechange = () => {
 
         console.log(
-            "ICE gathering:",
+            "ICE GATHERING STATE:",
             pc.iceGatheringState
         );
     };
@@ -229,14 +288,14 @@ async function start() {
         if (event.candidate) {
 
             console.log(
-                "ICE candidate:",
+                "BROWSER ICE CANDIDATE:",
                 event.candidate.candidate
             );
 
         } else {
 
             console.log(
-                "ICE candidate gathering complete"
+                "BROWSER ICE CANDIDATE GATHERING COMPLETE"
             );
         }
     };
@@ -249,10 +308,9 @@ async function start() {
     pc.ontrack = async (event) => {
 
         console.log(
-            "Received WebRTC track:",
+            "RECEIVED WEBRTC TRACK:",
             event.track.kind
         );
-
 
         const stream =
             new MediaStream();
@@ -264,19 +322,18 @@ async function start() {
         video.srcObject =
             stream;
 
-
         try {
 
             await video.play();
 
             console.log(
-                "Video playback started"
+                "VIDEO PLAYBACK STARTED"
             );
 
         } catch (error) {
 
             console.error(
-                "Video play failed:",
+                "VIDEO PLAY FAILED:",
                 error
             );
         }
@@ -299,9 +356,17 @@ async function start() {
     // Create Offer
     // =====================================================
 
+    console.log(
+        "Creating WebRTC offer..."
+    );
+
     const offer =
         await pc.createOffer();
 
+
+    // =====================================================
+    // Set Local Description
+    // =====================================================
 
     await pc.setLocalDescription(
         offer
@@ -309,13 +374,48 @@ async function start() {
 
 
     console.log(
-        "Local SDP created"
+        "LOCAL SDP CREATED"
+    );
+
+
+    // =====================================================
+    // WAIT FOR ICE GATHERING
+    // =====================================================
+
+    await waitForIceGatheringComplete(
+        pc
+    );
+
+
+    // =====================================================
+    // Print Final Local SDP
+    // =====================================================
+
+    console.log(
+        "======================================"
+    );
+
+    console.log(
+        "FINAL LOCAL SDP"
+    );
+
+    console.log(
+        "======================================"
+    );
+
+    console.log(
+        pc.localDescription.sdp
     );
 
 
     // =====================================================
     // Send Offer to GuardSense
     // =====================================================
+
+    console.log(
+        "Sending offer to /offer..."
+    );
+
 
     const response =
         await fetch(
@@ -344,7 +444,7 @@ async function start() {
     if (!response.ok) {
 
         console.error(
-            "Offer request failed:",
+            "OFFER REQUEST FAILED:",
             response.status
         );
 
@@ -365,7 +465,16 @@ async function start() {
 
 
     console.log(
-        "Received WebRTC answer"
+        "RECEIVED WEBRTC ANSWER"
+    );
+
+
+    console.log(
+        "REMOTE SDP:"
+    );
+
+    console.log(
+        answer.sdp
     );
 
 
@@ -379,7 +488,11 @@ async function start() {
 
 
     console.log(
-        "Remote description set"
+        "REMOTE DESCRIPTION SET"
+    );
+
+    console.log(
+        "Waiting for ICE connection..."
     );
 }
 
@@ -400,6 +513,11 @@ start();
 
 async def index(request):
 
+    print()
+    print("======================================")
+    print("HTTP REQUEST: /")
+    print("======================================")
+
     return web.Response(
         text=HTML,
         content_type="text/html"
@@ -412,7 +530,18 @@ async def index(request):
 
 async def offer(request):
 
+    print()
+    print("======================================")
+    print("HTTP REQUEST: /offer")
+    print("======================================")
+
+
     params = await request.json()
+
+
+    print(
+        "Received SDP offer from browser"
+    )
 
 
     offer = RTCSessionDescription(
@@ -435,8 +564,12 @@ async def offer(request):
 
     print()
     print("======================================")
-    print("New WebRTC connection")
+    print("NEW WEBRTC CONNECTION")
     print("======================================")
+
+    print(
+        "Peer connection created"
+    )
 
 
     # =====================================================
@@ -446,16 +579,23 @@ async def offer(request):
     @pc.on("connectionstatechange")
     async def on_connectionstatechange():
 
+        print()
+        print("--------------------------------------")
         print(
-            "WebRTC state:",
+            "WEBRTC CONNECTION STATE:",
             pc.connectionState
         )
+        print("--------------------------------------")
 
 
         if pc.connectionState in (
             "failed",
             "closed"
         ):
+
+            print(
+                "Closing failed/closed peer connection"
+            )
 
             await pc.close()
 
@@ -469,10 +609,13 @@ async def offer(request):
     @pc.on("iceconnectionstatechange")
     async def on_iceconnectionstatechange():
 
+        print()
+        print("--------------------------------------")
         print(
-            "ICE state:",
-            pc.iceConnectionState
+            f"[{time.strftime('%H:%M:%S')}] "
+            f"ICE CONNECTION STATE: {pc.iceConnectionState}"
         )
+        print("--------------------------------------")
 
 
     # =====================================================
@@ -482,8 +625,9 @@ async def offer(request):
     @pc.on("icegatheringstatechange")
     async def on_icegatheringstatechange():
 
+        print()
         print(
-            "ICE gathering state:",
+            "ICE GATHERING STATE:",
             pc.iceGatheringState
         )
 
@@ -492,10 +636,13 @@ async def offer(request):
     # Add GuardSense Video Track
     # =====================================================
 
+    print(
+        "Adding GuardSense video track..."
+    )
+
     track = GuardSenseVideoTrack(
         pipeline
     )
-
 
     pc.addTrack(track)
 
@@ -504,17 +651,67 @@ async def offer(request):
     # Receive Browser Offer
     # =====================================================
 
+    print(
+        "Setting remote browser description..."
+    )
+
     await pc.setRemoteDescription(
         offer
     )
+
+
+    print(
+        "Remote browser description set"
+    )
+
+
+    # =====================================================
+    # Print Browser ICE Candidates
+    # =====================================================
+
+    print()
+    print("======================================")
+    print("BROWSER ICE CANDIDATES")
+    print("======================================")
+
+
+    browser_candidate_count = 0
+
+
+    for line in offer.sdp.splitlines():
+
+        if line.startswith("a=candidate:"):
+
+            print(
+                "BROWSER CANDIDATE:",
+                line
+            )
+
+            browser_candidate_count += 1
+
+
+    print(
+        "Total browser candidates:",
+        browser_candidate_count
+    )
+
+    print("======================================")
 
 
     # =====================================================
     # Create Answer
     # =====================================================
 
+    print(
+        "Creating WebRTC answer..."
+    )
+
     answer = await pc.createAnswer()
 
+
+    # =====================================================
+    # Set Local Description
+    # =====================================================
 
     await pc.setLocalDescription(
         answer
@@ -523,6 +720,45 @@ async def offer(request):
 
     print(
         "Local WebRTC answer created"
+    )
+
+
+    # =====================================================
+    # Print Server ICE Candidates
+    # =====================================================
+
+    print()
+    print("======================================")
+    print("SERVER ICE CANDIDATES")
+    print("======================================")
+
+
+    server_candidate_count = 0
+
+
+    for line in pc.localDescription.sdp.splitlines():
+
+        if line.startswith("a=candidate:"):
+
+            print(
+                "SERVER CANDIDATE:",
+                line
+            )
+
+            server_candidate_count += 1
+
+
+    print(
+        "Total server candidates:",
+        server_candidate_count
+    )
+
+    print("======================================")
+
+
+    print()
+    print(
+        "Returning WebRTC answer to browser..."
     )
 
 
@@ -548,7 +784,9 @@ async def offer(request):
 async def shutdown(app):
 
     print()
-    print("Shutting down GuardSense...")
+    print("======================================")
+    print("SHUTTING DOWN GUARDSENSE")
+    print("======================================")
 
 
     # Stop pipeline
@@ -605,7 +843,7 @@ if __name__ == "__main__":
 
     print()
     print("======================================")
-    print("Starting GuardSense")
+    print("STARTING GUARDSENSE")
     print("======================================")
 
 
