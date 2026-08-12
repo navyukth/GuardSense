@@ -10,6 +10,8 @@ class CameraManager:
         if not cap.isOpened():
             raise Exception(f"Unable to open Camera: {src}")
         
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
         self.cameras[cam_id] = cap
 
     def get_frame(self,cam_id):

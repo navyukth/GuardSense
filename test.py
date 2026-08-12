@@ -3,6 +3,7 @@ from DataClass.types import Frame, DetectionResult
 from detection.yolo_detector import YOLODetector
 from tracking.bytetrack_adapter import ByteTrackAdapter
 
+from streaming.rtmp_publisher import RTMPPublisher
 
 import time
 import cv2
@@ -11,32 +12,43 @@ camera_Manager = CameraManager()
 
 camera_Manager.add_cam(
     "front_gate",
-    "rtsp://admin:admin%401234@192.168.0.140:554/cam/realmonitor?channel=1&subtype=1"
+    "rtsp://admin:admin%401234@192.168.0.140:554/cam/realmonitor?channel=1&subtype=0"
 )
 
 camera_Manager.add_cam(
     "side_gate",
-    "rtsp://admin:admin%401234@192.168.0.140:554/cam/realmonitor?channel=2&subtype=1"
+    "rtsp://admin:admin%401234@192.168.0.140:554/cam/realmonitor?channel=2&subtype=0"
 )
 
 camera_Manager.add_cam(
     "front_door",
-    "rtsp://admin:admin%401234@192.168.0.140:554/cam/realmonitor?channel=3&subtype=1"
+    "rtsp://admin:admin%401234@192.168.0.140:554/cam/realmonitor?channel=3&subtype=0"
 )
 
 camera_Manager.add_cam(
     "top",
-    "rtsp://admin:admin%401234@192.168.0.140:554/cam/realmonitor?channel=4&subtype=1"
+    "rtsp://admin:admin%401234@192.168.0.140:554/cam/realmonitor?channel=4&subtype=0"
 )
 
 detector = YOLODetector(
     # model_name="yolov8n.pt",
-    model_name="yolov8s.pt",
+    model_name="yolov8n.pt",
     confidence=0.3
 )
 
 
 tracker = ByteTrackAdapter()
+
+front_door = camera_Manager.get_frame("front_door")
+
+height, width = front_door.shape[:2]
+    
+publisher = RTMPPublisher(
+    rtmp_url="rtmp://localhost:1935/LiveApp/guardsense",
+    width=width,
+    height=height,
+    fps=25
+)
 
 while True:
 
@@ -86,10 +98,14 @@ while True:
             (0, 255, 0),
             1
         )
+    
+    publisher.write(front_door)
 
     cv2.imshow("ByteTrack Tracking", front_door)
 
     if cv2.waitKey(1) & 0xFF == ord("q"):
         break
 
+
+publisher.close()
 cv2.destroyAllWindows()
