@@ -28,6 +28,7 @@ load_dotenv()
 TURN_USERNAME = os.environ["TURN_USERNAME"]
 TURN_CREDENTIAL = os.environ["TURN_CREDENTIAL"]
 
+
 # =========================================================
 # GuardSense Pipeline
 # =========================================================
@@ -35,6 +36,11 @@ TURN_CREDENTIAL = os.environ["TURN_CREDENTIAL"]
 pipeline = GuardSensePipeline()
 
 pcs = set()
+
+# One camera at a time — keeps exactly 1 concurrent TURN relay allocation
+# (well under any free-tier limit) and avoids the extra CPU/network cost
+# of a second simultaneous stream.
+ALL_CAMERA_IDS = pipeline.get_camera_ids()
 
 
 # =========================================================
@@ -66,16 +72,19 @@ ICE_CONFIG = RTCConfiguration(
         ),
     ]
 )
+
+
 # =========================================================
 # WebRTC Video Track
 # =========================================================
 
 class GuardSenseVideoTrack(VideoStreamTrack):
 
-    def __init__(self, pipeline):
+    def __init__(self, pipeline, camera_id):
         super().__init__()
 
         self.pipeline = pipeline
+        self.camera_id = camera_id
 
     async def recv(self):
 
@@ -84,10 +93,9 @@ class GuardSenseVideoTrack(VideoStreamTrack):
 
         frame = None
 
-        # Wait until GuardSense has produced a frame
         while frame is None:
 
-            frame = self.pipeline.get_latest_frame()
+            frame = self.pipeline.get_latest_frame(self.camera_id)
 
             if frame is None:
                 await asyncio.sleep(0.01)
@@ -153,10 +161,56 @@ h1 {
     font-size: 16px;
 }
 
-video {
-    width: 90%;
-    max-width: 960px;
+#controls {
+    margin: 10px;
+}
+
+button {
+    background: #333;
+    color: white;
+    border: 1px solid #555;
+    padding: 8px 16px;
+    margin: 0 4px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+}
+
+button.active {
+    background: #2a7;
+    border-color: #2a7;
+}
+
+#grid {
+    display: flex;
+    justify-content: center;
+    padding: 8px;
+}
+
+.camera-tile {
+    position: relative;
     background: black;
+    border-radius: 6px;
+    overflow: hidden;
+    width: 95%;
+    max-width: 1280px;
+}
+
+.camera-tile video {
+    width: 100%;
+    display: block;
+    background: black;
+}
+
+.camera-label {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    background: rgba(0, 0, 0, 0.6);
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 14px;
+    font-weight: bold;
 }
 
 </style>
@@ -171,76 +225,83 @@ video {
     Starting WebRTC...
 </div>
 
-<video
-    id="video"
-    autoplay
-    muted
-    playsinline
-    controls>
-</video>
+<div id="controls"></div>
+
+<div id="grid"></div>
 
 
 <script>
 
-async function waitForIceGatheringComplete(pc) {
+let currentPc = null;
+let activeCameraId = null;
 
-    console.log(
-        "Waiting for ICE gathering to complete..."
-    );
+async function waitForIceGatheringComplete(pc, timeoutMs = 3000) {
 
     if (pc.iceGatheringState === "complete") {
-
-        console.log(
-            "ICE gathering already complete"
-        );
-
         return;
     }
 
-    await new Promise((resolve) => {
+    const gatheringComplete = new Promise((resolve) => {
 
         const checkState = () => {
 
-            console.log(
-                "ICE gathering state:",
-                pc.iceGatheringState
-            );
-
             if (pc.iceGatheringState === "complete") {
-
-                pc.removeEventListener(
-                    "icegatheringstatechange",
-                    checkState
-                );
-
+                pc.removeEventListener("icegatheringstatechange", checkState);
                 resolve();
             }
         };
 
-        pc.addEventListener(
-            "icegatheringstatechange",
-            checkState
-        );
-
+        pc.addEventListener("icegatheringstatechange", checkState);
     });
 
-    console.log(
-        "ICE gathering completed"
-    );
+    const timeout = new Promise((resolve) => {
+        setTimeout(() => {
+            console.log(
+                "ICE gathering timeout hit (" + timeoutMs + "ms) — " +
+                "proceeding with whatever candidates are gathered so far"
+            );
+            resolve();
+        }, timeoutMs);
+    });
+
+    // Whichever finishes first — full gathering, or the timeout —
+    // we proceed. Waiting for 100% completion (every possible TURN
+    // candidate, including retries) is what was causing the 50-60s delay.
+    await Promise.race([gatheringComplete, timeout]);
 }
 
 
-async function start() {
+async function connect(cameraId) {
 
     console.log("======================================");
-    console.log("Starting GuardSense WebRTC");
+    console.log("Switching to camera:", cameraId);
     console.log("======================================");
 
     const status =
         document.getElementById("status");
 
-    const video =
-        document.getElementById("video");
+    const grid =
+        document.getElementById("grid");
+
+    activeCameraId = cameraId;
+
+    // Mark the active button
+    document.querySelectorAll("#controls button").forEach((btn) => {
+        btn.classList.toggle("active", btn.dataset.cameraId === cameraId);
+    });
+
+    // Tear down the previous connection — releases its TURN allocation
+    // before we request the new one. Never more than 1 concurrent
+    // allocation at a time.
+    if (currentPc) {
+        console.log("Closing previous peer connection...");
+        currentPc.close();
+        currentPc = null;
+    }
+
+    grid.innerHTML = "";
+
+    status.innerText = "Connecting " + cameraId + "...";
 
 
     // =====================================================
@@ -275,273 +336,108 @@ async function start() {
         ],
     });
 
-
-    // =====================================================
-    // Connection State
-    // =====================================================
+    currentPc = pc;
 
     pc.onconnectionstatechange = () => {
 
-        console.log(
-            "WEBRTC CONNECTION STATE:",
-            pc.connectionState
-        );
+        console.log("WEBRTC CONNECTION STATE:", pc.connectionState);
 
         status.innerText =
-            "Connection: " +
-            pc.connectionState;
+            cameraId + " — Connection: " + pc.connectionState;
     };
-
-
-    // =====================================================
-    // ICE Connection State
-    // =====================================================
 
     pc.oniceconnectionstatechange = () => {
-
-        console.log(
-            "ICE CONNECTION STATE:",
-            pc.iceConnectionState
-        );
-
-        status.innerText =
-            "ICE: " +
-            pc.iceConnectionState;
+        console.log("ICE CONNECTION STATE:", pc.iceConnectionState);
     };
-
-
-    // =====================================================
-    // ICE Gathering State
-    // =====================================================
-
-    pc.onicegatheringstatechange = () => {
-
-        console.log(
-            "ICE GATHERING STATE:",
-            pc.iceGatheringState
-        );
-    };
-
-
-    // =====================================================
-    // ICE Candidate
-    // =====================================================
-
-    pc.onicecandidate = (event) => {
-
-        if (event.candidate) {
-
-            console.log(
-                "BROWSER ICE CANDIDATE:",
-                event.candidate.candidate
-            );
-
-        } else {
-
-            console.log(
-                "BROWSER ICE CANDIDATE GATHERING COMPLETE"
-            );
-        }
-    };
-
-
-    // =====================================================
-    // WebRTC Track
-    // =====================================================
 
     pc.ontrack = async (event) => {
 
-        console.log(
-            "RECEIVED WEBRTC TRACK:",
-            event.track.kind
-        );
+        console.log("RECEIVED TRACK for camera:", cameraId);
 
-        const stream =
-            new MediaStream();
+        const tile = document.createElement("div");
+        tile.className = "camera-tile";
 
-        stream.addTrack(
-            event.track
-        );
+        const label = document.createElement("div");
+        label.className = "camera-label";
+        label.innerText = cameraId;
 
-        video.srcObject =
-            stream;
+        const video = document.createElement("video");
+        video.autoplay = true;
+        video.muted = true;
+        video.playsInline = true;
+
+        tile.appendChild(video);
+        tile.appendChild(label);
+        grid.appendChild(tile);
+
+        const stream = new MediaStream();
+        stream.addTrack(event.track);
+        video.srcObject = stream;
 
         try {
-
             await video.play();
-
-            console.log(
-                "VIDEO PLAYBACK STARTED"
-            );
-
         } catch (error) {
-
-            console.error(
-                "VIDEO PLAY FAILED:",
-                error
-            );
+            console.error("VIDEO PLAY FAILED:", cameraId, error);
         }
     };
 
+    // Exactly one recvonly slot — server fills it with the requested camera
+    pc.addTransceiver("video", { direction: "recvonly" });
 
-    // =====================================================
-    // Receive Video
-    // =====================================================
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
 
-    pc.addTransceiver(
-        "video",
-        {
-            direction: "recvonly"
-        }
-    );
+    await waitForIceGatheringComplete(pc);
 
-
-    // =====================================================
-    // Create Offer
-    // =====================================================
-
-    console.log(
-        "Creating WebRTC offer..."
-    );
-
-    const offer =
-        await pc.createOffer();
-
-
-    // =====================================================
-    // Set Local Description
-    // =====================================================
-
-    await pc.setLocalDescription(
-        offer
-    );
-
-
-    console.log(
-        "LOCAL SDP CREATED"
-    );
-
-
-    // =====================================================
-    // WAIT FOR ICE GATHERING
-    // =====================================================
-
-    await waitForIceGatheringComplete(
-        pc
-    );
-
-
-    // =====================================================
-    // Print Final Local SDP
-    // =====================================================
-
-    console.log(
-        "======================================"
-    );
-
-    console.log(
-        "FINAL LOCAL SDP"
-    );
-
-    console.log(
-        "======================================"
-    );
-
-    console.log(
-        pc.localDescription.sdp
-    );
-
-
-    // =====================================================
-    // Send Offer to GuardSense
-    // =====================================================
-
-    console.log(
-        "Sending offer to /offer..."
-    );
-
-
-    const response =
-        await fetch(
-            "/offer",
-            {
-                method: "POST",
-
-                headers: {
-                    "Content-Type":
-                        "application/json"
-                },
-
-                body: JSON.stringify({
-
-                    sdp:
-                        pc.localDescription.sdp,
-
-                    type:
-                        pc.localDescription.type
-
-                })
-            }
-        );
-
+    const response = await fetch("/offer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            sdp: pc.localDescription.sdp,
+            type: pc.localDescription.type,
+            camera_id: cameraId
+        })
+    });
 
     if (!response.ok) {
-
-        console.error(
-            "OFFER REQUEST FAILED:",
-            response.status
-        );
-
-        status.innerText =
-            "Offer failed: " +
-            response.status;
-
+        status.innerText = "Offer failed: " + response.status;
         return;
     }
 
+    const answer = await response.json();
 
-    // =====================================================
-    // Receive Answer
-    // =====================================================
+    console.log("CONFIRMED CAMERA:", answer.camera_id);
 
-    const answer =
-        await response.json();
-
-
-    console.log(
-        "RECEIVED WEBRTC ANSWER"
-    );
-
-
-    console.log(
-        "REMOTE SDP:"
-    );
-
-    console.log(
-        answer.sdp
-    );
-
-
-    // =====================================================
-    // Set Remote Description
-    // =====================================================
-
-    await pc.setRemoteDescription(
-        answer
-    );
-
-
-    console.log(
-        "REMOTE DESCRIPTION SET"
-    );
-
-    console.log(
-        "Waiting for ICE connection..."
-    );
+    await pc.setRemoteDescription(answer);
 }
 
 
-start();
+async function setupControls() {
+
+    const controls = document.getElementById("controls");
+
+    const response = await fetch("/api/cameras");
+    const data = await response.json();
+    const cameraIds = data.camera_ids;
+
+    cameraIds.forEach((cameraId) => {
+
+        const btn = document.createElement("button");
+        btn.innerText = cameraId;
+        btn.dataset.cameraId = cameraId;
+        btn.onclick = () => connect(cameraId);
+
+        controls.appendChild(btn);
+    });
+
+    // Start on the first camera by default
+    if (cameraIds.length > 0) {
+        connect(cameraIds[0]);
+    }
+}
+
+
+setupControls();
 
 </script>
 
@@ -581,6 +477,17 @@ async def index(request):
 
 
 # =========================================================
+# Camera List
+# =========================================================
+
+async def cameras(request):
+
+    return web.json_response(
+        {"camera_ids": ALL_CAMERA_IDS}
+    )
+
+
+# =========================================================
 # WebRTC Offer
 # =========================================================
 
@@ -594,11 +501,14 @@ async def offer(request):
 
     params = await request.json()
 
+    camera_id = params.get("camera_id", ALL_CAMERA_IDS[0])
+
+    if camera_id not in ALL_CAMERA_IDS:
+        camera_id = ALL_CAMERA_IDS[0]
 
     print(
-        "Received SDP offer from browser"
+        f"Requested camera: {camera_id}"
     )
-
 
     offer = RTCSessionDescription(
         sdp=params["sdp"],
@@ -693,13 +603,10 @@ async def offer(request):
     # =====================================================
 
     print(
-        "Adding GuardSense video track..."
+        f"Adding video track for camera: {camera_id}"
     )
 
-    track = GuardSenseVideoTrack(
-        pipeline
-    )
-
+    track = GuardSenseVideoTrack(pipeline, camera_id)
     pc.addTrack(track)
 
 
@@ -828,7 +735,10 @@ async def offer(request):
                 pc.localDescription.sdp,
 
             "type":
-                pc.localDescription.type
+                pc.localDescription.type,
+
+            "camera_id":
+                camera_id
         }
     )
 
@@ -877,6 +787,12 @@ app = web.Application()
 app.router.add_get(
     "/",
     index
+)
+
+
+app.router.add_get(
+    "/api/cameras",
+    cameras
 )
 
 
