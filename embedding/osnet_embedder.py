@@ -1,5 +1,11 @@
 import numpy as np
-from torchreid.utils import FeatureExtractor
+
+try:
+    # torchreid >=0.2.5 from PyPI nests everything under torchreid.reid
+    from torchreid.reid.utils import FeatureExtractor
+except ImportError:
+    # older torchreid (e.g. installed from GitHub) keeps it at the top level
+    from torchreid.utils import FeatureExtractor
 
 from embedding.embedder import Embedder
 from DataClass.types import TrackingResult, EmbeddingResult, Embedding

@@ -7,12 +7,19 @@ from DataClass.types import Frame, Detection, DetectionResult
 
 class YOLODetector(Detector):
 
-    def __init__(self, model_name: str, confidence: float, device: str = "cuda"):
+    def __init__(self, model_name: str, confidence: float, device: str = "cuda", imgsz: int = 640):
 
         try:
             self.model = YOLO(model_name)
-            self.model.to(device)
             self.confidence = confidence
+            self.imgsz = imgsz
+
+            # Non-PyTorch export formats (NCNN, ONNX, ...) run through
+            # Ultralytics' AutoBackend and don't support .to(device) - it's
+            # meaningless for them anyway since e.g. NCNN is CPU-only by
+            # construction. Only real .pt models need explicit placement.
+            if model_name.endswith(".pt"):
+                self.model.to(device)
         except Exception as e:
             print(f"YOLODetector failed to load model '{model_name}': {e}")
             raise
@@ -42,6 +49,7 @@ class YOLODetector(Detector):
             source=dummy_frame,
             classes=[0],
             conf=self.confidence,
+            imgsz=self.imgsz,
             verbose=False
         )
 
@@ -67,6 +75,7 @@ class YOLODetector(Detector):
             source=images,
             classes=[0],
             conf=self.confidence,
+            imgsz=self.imgsz,
             verbose=False
         )
 

@@ -1,0 +1,17 @@
+[Unit]
+Description=GuardSense capture node (camera capture + YOLO/ByteTrack/OSNet pipeline)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nunna
+WorkingDirectory=/home/nunna/guardsense-pi-test
+ExecStart=/home/nunna/guardsense-pi-test/.venv/bin/python -u -m streaming.capture_node
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/nunna/guardsense-pi-test/capture.log
+StandardError=append:/home/nunna/guardsense-pi-test/capture.log
+
+[Install]
+WantedBy=multi-user.target

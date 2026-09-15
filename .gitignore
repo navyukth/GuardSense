@@ -13,10 +13,11 @@ env/
 ENV/
 
 # -----------------------------
-# IDEs
+# IDEs / tools
 # -----------------------------
 .vscode/
 .idea/
+.claude/
 
 # -----------------------------
 # Operating System
@@ -55,6 +56,10 @@ dist/
 
 # Uncomment if you keep models locally
 # models/
+
+# NCNN export output (streaming/export_ncnn.py) - platform/imgsz-specific,
+# regenerate per machine rather than committing
+*_ncnn_model/
 
 # -----------------------------
 # Databases

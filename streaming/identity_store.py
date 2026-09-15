@@ -87,7 +87,11 @@ def _row_to_crop(row):
     }
 
 
-def add_crop(camera_id, track_id, jpeg_bytes, embedding):
+def add_crop(camera_id, track_id, jpeg_bytes, embedding, person_id=None):
+    """person_id lets the capture node auto-tag a crop it already matched
+    to a known person via live re-id, instead of every crop landing in the
+    unassigned queue for manual review every single time."""
+
     filename = f"{uuid.uuid4().hex}.jpg"
     with open(os.path.join(CROPS_DIR, filename), "wb") as f:
         f.write(jpeg_bytes)
@@ -99,11 +103,30 @@ def add_crop(camera_id, track_id, jpeg_bytes, embedding):
         cur = conn.execute(
             """INSERT INTO crops (person_id, session_key, camera_id, track_id,
                                    filename, embedding, created_at)
-               VALUES (NULL, ?, ?, ?, ?, ?, ?)""",
-            (session_key, camera_id, track_id, filename, _pack(embedding), time.time())
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (person_id, session_key, camera_id, track_id, filename, _pack(embedding), time.time())
         )
+        if person_id is not None:
+            _recompute_person_embedding(conn, person_id)
         conn.commit()
         return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def list_person_embeddings():
+    """Every named person that has an embedding yet, for the capture
+    node's live re-id matcher to pull down periodically."""
+
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT id, name, embedding FROM persons WHERE embedding IS NOT NULL"
+        ).fetchall()
+        return [
+            {"id": row["id"], "name": row["name"], "embedding": _unpack(row["embedding"]).tolist()}
+            for row in rows
+        ]
     finally:
         conn.close()
 
@@ -313,6 +336,24 @@ def delete_crop(crop_id):
         _delete_crops(conn, [crop_id])
         if row and row["person_id"] is not None:
             _recompute_person_embedding(conn, row["person_id"])
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_group(session_key):
+    """Discards an unlabeled group entirely - every crop for that track,
+    deleted outright, no person ever created for it."""
+
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT id FROM crops WHERE session_key = ? AND person_id IS NULL",
+            (session_key,)
+        ).fetchall()
+
+        if rows:
+            _delete_crops(conn, [r["id"] for r in rows])
         conn.commit()
     finally:
         conn.close()

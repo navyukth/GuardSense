@@ -13,6 +13,7 @@ import asyncio
 import os
 import struct
 import time
+from collections import deque
 
 import cv2
 import numpy as np
@@ -31,6 +32,7 @@ from av import VideoFrame
 
 from streaming.webui import Auth, render_html, render_settings_html
 from streaming.people_ui import render_people_html
+from streaming.logs_ui import render_logs_html
 from streaming import identity_store
 
 
@@ -87,7 +89,10 @@ server_started_at = time.time()
 
 pcs = set()
 
-auth = Auth(ADMIN_PASSWORD, exempt_paths=("/ws/ingest",))
+auth = Auth(ADMIN_PASSWORD, exempt_paths=("/ws/ingest", "/api/internal/people-embeddings"))
+
+
+FRAME_STALE_SECONDS = 5.0
 
 
 class FrameStore:
@@ -95,29 +100,47 @@ class FrameStore:
     Latest annotated frame per camera, as received from the capture node.
     Mirrors the shape of GuardSensePipeline.get_latest_frame() so
     RelayVideoTrack can stay nearly identical to GuardSenseVideoTrack.
+
+    Tracks a per-camera timestamp too - without it, RelayVideoTrack would
+    happily keep re-serving the last frame it ever received forever if the
+    capture node dies, which looks exactly like a live (but frozen) feed
+    instead of an obviously dead one.
     """
 
     def __init__(self):
         self.frames = {}
+        self.frame_updated_at = {}
         self.lock = asyncio.Lock()
         self.last_ingest_at = None
 
     async def set_frame(self, camera_id, frame):
         async with self.lock:
             self.frames[camera_id] = frame
+            self.frame_updated_at[camera_id] = time.time()
             self.last_ingest_at = time.time()
 
     async def get_frame(self, camera_id):
         async with self.lock:
-            return self.frames.get(camera_id)
+            frame = self.frames.get(camera_id)
+            updated_at = self.frame_updated_at.get(camera_id)
+
+        if frame is None or updated_at is None:
+            return None
+        if time.time() - updated_at > FRAME_STALE_SECONDS:
+            return None
+        return frame
+
+
+MAX_LOG_LINES = 500
 
 
 class RelayState:
-    """Latest alerts/status JSON pushed in from the capture node."""
+    """Latest alerts/status/logs JSON pushed in from the capture node."""
 
     def __init__(self):
         self.alerts = []
         self.capture_status = {}
+        self.logs = deque(maxlen=MAX_LOG_LINES)
         self.lock = asyncio.Lock()
 
     async def set_alerts(self, alerts):
@@ -127,6 +150,14 @@ class RelayState:
     async def set_status(self, status):
         async with self.lock:
             self.capture_status = status
+
+    async def add_logs(self, entries):
+        async with self.lock:
+            self.logs.extend(entries)
+
+    async def get_logs(self):
+        async with self.lock:
+            return list(self.logs)
 
 
 frame_store = FrameStore()
@@ -138,6 +169,22 @@ relay_state = RelayState()
 # locally-running GuardSensePipeline
 # =========================================================
 
+def _placeholder_frame(camera_id):
+    # Built directly in RGB (not BGR) since this bypasses the normal
+    # cvtColor(BGR2RGB) conversion applied to real camera frames - using
+    # only gray/white keeps that irrelevant either way.
+    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    cv2.putText(
+        image, "No live feed", (140, 220),
+        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (220, 220, 220), 2, cv2.LINE_AA
+    )
+    cv2.putText(
+        image, f"({camera_id} - capture node disconnected)", (60, 260),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (140, 140, 140), 1, cv2.LINE_AA
+    )
+    return image
+
+
 class RelayVideoTrack(VideoStreamTrack):
 
     def __init__(self, camera_id):
@@ -148,14 +195,12 @@ class RelayVideoTrack(VideoStreamTrack):
 
         pts, time_base = await self.next_timestamp()
 
-        frame = None
+        frame = await frame_store.get_frame(self.camera_id)
 
-        while frame is None:
-            frame = await frame_store.get_frame(self.camera_id)
-            if frame is None:
-                await asyncio.sleep(0.01)
-
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        if frame is None:
+            frame = _placeholder_frame(self.camera_id)
+        else:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
         video_frame = VideoFrame.from_ndarray(frame, format="rgb24")
         video_frame.pts = pts
@@ -200,9 +245,14 @@ def _parse_crop_message(data):
     embedding = np.frombuffer(data[offset:offset + emb_len * 4], dtype=np.float32)
     offset += emb_len * 4
 
+    # signed - the capture node sends -1 when its live re-id matcher found
+    # no known person above threshold, otherwise the matched person's id
+    person_id = struct.unpack(">i", data[offset:offset + 4])[0]
+    offset += 4
+
     jpg_bytes = data[offset:]
 
-    return camera_id, track_id, embedding, jpg_bytes
+    return camera_id, track_id, embedding, person_id, jpg_bytes
 
 
 async def ws_ingest(request):
@@ -238,10 +288,11 @@ async def ws_ingest(request):
 
             elif msg_type == MSG_TYPE_CROP:
 
-                camera_id, track_id, embedding, jpg_bytes = _parse_crop_message(data)
+                camera_id, track_id, embedding, person_id, jpg_bytes = _parse_crop_message(data)
 
                 await asyncio.to_thread(
-                    identity_store.add_crop, camera_id, track_id, jpg_bytes, embedding
+                    identity_store.add_crop, camera_id, track_id, jpg_bytes, embedding,
+                    person_id if person_id >= 0 else None
                 )
 
         elif msg.type == WSMsgType.TEXT:
@@ -253,6 +304,8 @@ async def ws_ingest(request):
                 await relay_state.set_alerts(payload["data"])
             elif payload.get("type") == "status":
                 await relay_state.set_status(payload["data"])
+            elif payload.get("type") == "logs":
+                await relay_state.add_logs(payload["data"])
 
         elif msg.type in (WSMsgType.ERROR, WSMsgType.CLOSE):
             break
@@ -275,6 +328,10 @@ async def index(request):
 
 async def cameras(request):
     return web.json_response({"camera_ids": CAMERA_IDS})
+
+
+async def logs_page(request):
+    return web.Response(text=render_logs_html(), content_type="text/html")
 
 
 async def settings_page(request):
@@ -305,6 +362,19 @@ async def crop_image(request):
         raise web.HTTPNotFound()
 
     return web.FileResponse(path)
+
+
+async def api_internal_people_embeddings(request):
+    """Token-authenticated (not cookie-authenticated) - this is what the
+    capture node's live re-id matcher polls, same trust boundary as
+    /ws/ingest since it's the same process on the other end."""
+
+    token = request.query.get("token")
+    if token != INGEST_TOKEN:
+        raise web.HTTPUnauthorized(text="bad ingest token")
+
+    people = await asyncio.to_thread(identity_store.list_person_embeddings)
+    return web.json_response({"people": people})
 
 
 async def api_people(request):
@@ -361,6 +431,12 @@ async def api_merge(request):
     return web.json_response({"person_id": into_id})
 
 
+async def api_delete_group(request):
+    session_key = request.match_info["session_key"]
+    await asyncio.to_thread(identity_store.delete_group, session_key)
+    return web.json_response({"ok": True})
+
+
 async def api_delete_person(request):
     person_id = int(request.match_info["person_id"])
     await asyncio.to_thread(identity_store.delete_person, person_id)
@@ -375,6 +451,10 @@ async def api_delete_crop(request):
 
 async def alerts(request):
     return web.json_response({"alerts": relay_state.alerts})
+
+
+async def logs(request):
+    return web.json_response({"logs": await relay_state.get_logs()})
 
 
 async def status(request):
@@ -394,6 +474,7 @@ async def status(request):
         "uptime_human": f"{hours}h {minutes}m {seconds}s",
         "active_connections": len(pcs),
         "capture_node_connected": capture_connected,
+        "capture_loop_count": relay_state.capture_status.get("loop_count"),
     }
 
     return web.json_response(merged)
@@ -455,14 +536,18 @@ app.router.add_post("/login", auth.login_submit)
 app.router.add_get("/logout", auth.logout)
 app.router.add_get("/settings", settings_page)
 app.router.add_get("/people", people_page)
+app.router.add_get("/logs", logs_page)
 app.router.add_get("/crop-image/{filename}", crop_image)
 app.router.add_get("/api/cameras", cameras)
+app.router.add_get("/api/logs", logs)
+app.router.add_get("/api/internal/people-embeddings", api_internal_people_embeddings)
 app.router.add_get("/api/people", api_people)
 app.router.add_get("/api/people/unassigned", api_unassigned)
 app.router.add_get("/api/people/group/{session_key}/crops", api_group_crops)
 app.router.add_get("/api/people/{person_id}/crops", api_person_crops)
 app.router.add_post("/api/people/assign", api_assign)
 app.router.add_post("/api/people/merge", api_merge)
+app.router.add_delete("/api/people/group/{session_key}", api_delete_group)
 app.router.add_delete("/api/people/{person_id}", api_delete_person)
 app.router.add_delete("/api/crops/{crop_id}", api_delete_crop)
 app.router.add_get("/api/alerts", alerts)

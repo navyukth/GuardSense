@@ -285,12 +285,17 @@ function renderUnassigned(groups) {
                     ${personSelectOptions(null)}
                 </select>
                 <button data-confirm="${escapeHtml(g.session_key)}">Save</button>
+                <button class="danger" data-delete-group="${escapeHtml(g.session_key)}">Delete</button>
             </div>
         </div>
     `).join("");
 
     el.querySelectorAll("button[data-confirm]").forEach((btn) => {
         btn.addEventListener("click", () => onAssignClick(btn.dataset.confirm));
+    });
+
+    el.querySelectorAll("button[data-delete-group]").forEach((btn) => {
+        btn.addEventListener("click", () => onDeleteGroup(btn.dataset.deleteGroup));
     });
 }
 
@@ -458,6 +463,12 @@ function openMergeModal({ title, sub, crops, onConfirm }) {
 
     confirmBtn.onclick = confirmHandler;
     cancelBtn.onclick = close;
+}
+
+async function onDeleteGroup(sessionKey) {
+    if (!confirm("Discard this whole track and its crops? This can't be undone.")) return;
+    await api(`/api/people/group/${encodeURIComponent(sessionKey)}`, { method: "DELETE" });
+    await loadAll();
 }
 
 async function onDeletePerson(id, name) {

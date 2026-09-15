@@ -180,6 +180,7 @@ button.active {
 <div id="topbar">
     <h1>GuardSense Live</h1>
     <a id="logout" href="/people">People</a>
+    <a id="logout" href="/logs">Logs</a>
     <a id="logout" href="/settings">Settings</a>
     <a id="logout" href="/logout">Log out</a>
 </div>

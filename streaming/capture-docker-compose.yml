@@ -1,0 +1,17 @@
+services:
+  guardsense-capture:
+    build:
+      context: .
+      dockerfile: capture.Dockerfile
+      args:
+        YOLO_EXPORT_IMGSZ: ${YOLO_IMGSZ:-320}
+    container_name: guardsense-capture
+    restart: unless-stopped
+    # Needs to reach the DVR (LAN) and the relay (localhost, since both
+    # run on the Pi5 now) - simplest is host networking, same reasoning
+    # as coturn/guardsense-relay.
+    network_mode: host
+    env_file:
+      - .env
+    volumes:
+      - ./data/crops:/app/crops
