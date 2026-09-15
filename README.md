@@ -44,8 +44,9 @@ Both currently run as Docker containers on the same Pi5
 need unrestricted access to the WebRTC/TURN port range). The pipeline can
 also run on a separate machine (e.g. a laptop with more CPU headroom) by
 pointing `RELAY_URL`/`RELAY_HTTP_URL` in `.env` at the relay's address
-instead of `localhost` - see [`serverpi.md`](serverpi.md) (gitignored,
-has real credentials) for the full Pi5 infra reference.
+instead of `localhost` - see [`PI5_DEPLOYMENT.md`](PI5_DEPLOYMENT.md) for
+the full deployment reference (router port forwards, nginx/coturn setup,
+directory layout, common pitfalls).
 
 ## Repo layout
 
