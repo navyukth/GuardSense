@@ -48,7 +48,12 @@ class _RingBufferLogHandler(logging.Handler):
     def __init__(self, maxlen=500):
         super().__init__()
         self.pending = collections.deque(maxlen=maxlen)
-        self.lock = threading.Lock()
+        # NOT self.lock - logging.Handler already uses that name internally
+        # (handle() -> acquire() -> emit() locks self.lock before calling
+        # us), so reusing it here self-deadlocks the first log call: the
+        # base class acquires it, then our emit() tries to acquire the
+        # same non-reentrant lock again on the same thread.
+        self.buffer_lock = threading.Lock()
 
     def emit(self, record):
         entry = {
@@ -56,11 +61,11 @@ class _RingBufferLogHandler(logging.Handler):
             "message": self.format(record),
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(record.created)),
         }
-        with self.lock:
+        with self.buffer_lock:
             self.pending.append(entry)
 
     def drain(self):
-        with self.lock:
+        with self.buffer_lock:
             entries = list(self.pending)
             self.pending.clear()
         return entries

@@ -10,12 +10,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install CPU-only torch explicitly first - pip's default PyPI wheel pulls
-# in CUDA/cuDNN (several GB) unconditionally even on this ARM board with
-# no NVIDIA GPU. Installing from the CPU index first means the later
-# `pip install -r requirements.txt` sees torch already satisfied and
-# skips pulling a CUDA build in as a transitive dep of ultralytics/torchreid.
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+# Install CPU-only torch+torchvision together, from the same index -
+# pip's default PyPI wheel pulls in CUDA/cuDNN (several GB) unconditionally
+# even on this ARM board with no NVIDIA GPU. Installing both together here
+# means the later `pip install -r requirements.txt` (torchreid pulls in
+# torchvision as a dep) sees both already satisfied, instead of grabbing a
+# mismatched torchvision build that breaks native op registration
+# (RuntimeError: operator torchvision::nms does not exist).
+RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
