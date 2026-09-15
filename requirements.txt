@@ -1,0 +1,6 @@
+ultralytics
+torchreid
+opencv-python
+numpy
+python-dotenv
+websockets

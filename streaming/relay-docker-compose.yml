@@ -1,0 +1,15 @@
+services:
+  guardsense-relay:
+    build:
+      context: .
+      dockerfile: relay.Dockerfile
+    container_name: guardsense-relay
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      - IDENTITY_DB_PATH=/app/data/identities.db
+      - RELAY_CROPS_DIR=/app/data/crops_relay
+    volumes:
+      - ./data:/app/data

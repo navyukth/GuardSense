@@ -9,3 +9,7 @@ class Detector(ABC):
     @abstractmethod
     def detect(self,frame: Frame) -> DetectionResult:
         pass
+
+    @abstractmethod
+    def detect_batch(self, frames: list[Frame]) -> list[DetectionResult]:
+        pass

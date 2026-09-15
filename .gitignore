@@ -7,6 +7,7 @@ __pycache__/
 
 # Virtual Environments
 venv/
+.venv/
 .gd/
 env/
 ENV/
@@ -34,6 +35,7 @@ logs/
 # -----------------------------
 .env
 .env.*
+!.env.example
 
 # -----------------------------
 # Build / Distribution
@@ -82,6 +84,8 @@ temp/
 captures/
 recordings/
 screenshots/
+crops/
+crops_relay/
 
 # -----------------------------
 # Qt Generated Files
@@ -102,6 +106,9 @@ htmlcov/
 *.bak
 *.swp
 *.swo
+
+# Contains real infra credentials (Pi SSH password, TURN secret, API keys)
+serverpi.md
 
 # -----------------------------
 # OtherStuff
