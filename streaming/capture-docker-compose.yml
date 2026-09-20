@@ -11,6 +11,8 @@ services:
     # run on the Pi5 now) - simplest is host networking, same reasoning
     # as coturn/guardsense-relay.
     network_mode: host
+    environment:
+      - TZ=Asia/Kolkata
     env_file:
       - .env
     volumes:

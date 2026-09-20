@@ -9,6 +9,7 @@ services:
     env_file:
       - .env
     environment:
+      - TZ=Asia/Kolkata
       - IDENTITY_DB_PATH=/app/data/identities.db
       - RELAY_CROPS_DIR=/app/data/crops_relay
     volumes:

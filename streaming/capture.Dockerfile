@@ -3,9 +3,10 @@ FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1
 
 # opencv needs libGL/glib even in "headless" builds; ffmpeg backs cv2's
-# RTSP decode (cv2.CAP_FFMPEG)
+# RTSP decode (cv2.CAP_FFMPEG); tzdata so the TZ env var (docker-compose.yml)
+# actually resolves - without it every timestamp silently renders in UTC.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1 libglib2.0-0 ffmpeg \
+    libgl1 libglib2.0-0 ffmpeg tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

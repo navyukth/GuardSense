@@ -22,7 +22,7 @@ Static Public IP
     | Router port forwards (Section 2)
 Router (any brand supporting port forwarding)
     |
-Raspberry Pi 5 - LAN IP e.g. 192.168.0.170 (DHCP reservation recommended)
+Raspberry Pi 5 - LAN IP e.g. 192.168.1.50 (DHCP reservation recommended)
     |
     +-- Docker bridge network: npm_network
     |     +-- nginx-proxy-manager (container: npm) - ports 80, 443, 81(admin)
@@ -144,7 +144,73 @@ and pin `torch`+`torchvision` together or you'll hit
 `RuntimeError: operator torchvision::nms does not exist` from a version
 mismatch.
 
-## 6. Quick commands
+## 6. Timezone, retention and disk space
+
+- **Timezone:** containers run in UTC by default, so alert/log timestamps
+  came out hours off. Set `TZ=<your zone>` under `environment:` in each
+  compose file **and** install `tzdata` in the Dockerfile (Debian slim
+  doesn't ship it, and `TZ` does nothing without it).
+- **Retention** (relay `environment:` / `.env`): `UNASSIGNED_RETENTION_HOURS`
+  (default 48) purges never-named crops; `PERSON_MAX_CROPS` (default 300)
+  trims each named person to their best crops; `RETENTION_INTERVAL_SECONDS`
+  (default 3600) is how often it runs.
+- **Capture-side crop limits** (capture `.env`): `CROP_MIN_INTERVAL`,
+  `CROPS_PER_TRACK`, `CROPS_PER_TRACK_MATCHED`, `CROP_MIN_HEIGHT/WIDTH`,
+  and `SAVE_LOCAL_CROPS` (keep off - it duplicates every crop onto the SD
+  card).
+- **Disk:** most of the SD card ends up as Docker build cache from repeated
+  rebuilds, not GuardSense's data. Check with `docker system df` and
+  `du -xh --max-depth=1 ~ | sort -rh | head`; reclaim with
+  `docker builder prune -f` (unused cache only - running containers, images
+  and data are untouched, the next rebuild is just slower).
+- **Local-only access:** to take the public hostname offline, disable (or
+  delete) that proxy host in the Nginx Proxy Manager UI rather than editing
+  nginx's generated config - NPM regenerates it. The relay still listens on
+  `<pi-lan-ip>:8080` on the LAN.
+
+## 7. CI/CD (push to `main` deploys to the Pi)
+
+A **self-hosted GitHub Actions runner** on the Pi runs `deploy/deploy.sh`
+after each push to `main`. It makes only *outbound* connections to GitHub, so
+no port-forward is needed.
+
+**One-time setup** (on the Pi):
+1. In the GitHub repo: Settings -> Actions -> Runners -> **New self-hosted
+   runner**, and copy the registration token (valid ~1 hour).
+2. On the Pi, from a checkout of the repo (or just the script):
+   ```bash
+   bash deploy/setup-runner.sh <owner>/<repo> <registration-token>
+   ```
+   It downloads the arm64 runner, registers it with the label `pi5`, and
+   installs a systemd service (`sudo` needed) so it survives reboots.
+3. The runner user must be in the `docker` group (`id` should list it).
+4. The runner should show as **Idle** in that Runners page.
+
+**What a deploy does:** the `check` job compiles every module on a
+GitHub-hosted runner; then the `deploy` job (on the Pi) copies changed files
+into `~/npm/guardsense-relay` / `~/npm/guardsense-capture`, rebuilds only the
+service(s) that changed, and health-checks them. It never touches `.env`,
+`data/` or `yolov8n.pt` (the weights are gitignored, so they must already be
+in `~/npm/guardsense-capture/`).
+
+**Run it by hand / preview:**
+```bash
+bash deploy/deploy.sh              # deploy what changed
+DRY_RUN=1 bash deploy/deploy.sh    # show what would change, modify nothing
+FORCE=1   bash deploy/deploy.sh    # rebuild both regardless
+```
+You can also trigger it from the repo's Actions tab ("Run workflow", with a
+*force* option).
+
+**Security:** the workflow deliberately has no `pull_request` trigger - a
+self-hosted runner runs code on your Pi, so it must never run a fork's PR. If
+the repo is public, also set Settings -> Actions -> General -> *Require
+approval for outside collaborators*.
+
+**Rolling back:** `git revert <bad-commit>` and push - that redeploys the old
+code. There's no automatic rollback.
+
+## 8. Quick commands
 
 ```bash
 docker ps                                    # all running containers

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Laptop-side capture node: owns every camera, runs ONE batched YOLO pass per
 loop across all feeds, tracks each camera separately (ByteTrack state must
 never mix identities between cameras), periodically re-embeds active tracks
@@ -17,6 +17,7 @@ import os
 import struct
 import threading
 import time
+import uuid
 
 import cv2
 import numpy as np
@@ -89,6 +90,10 @@ RELAY_HTTP_URL = os.environ.get(
 INFERENCE_DEVICE = os.environ.get("INFERENCE_DEVICE", "cpu")
 YOLO_IMGSZ = int(os.environ.get("YOLO_IMGSZ", "640"))
 YOLO_MODEL = os.environ.get("YOLO_MODEL", "yolov8n.pt")
+# 0.3 (the old default) let through a lot of bikes/shadows/reflections
+# misdetected as "person" - raised the floor since low-imgsz inference
+# (320px) is already more error-prone on ambiguous shapes.
+YOLO_CONFIDENCE = float(os.environ.get("YOLO_CONFIDENCE", "0.5"))
 REID_MATCH_THRESHOLD = float(os.environ.get("REID_MATCH_THRESHOLD", "0.6"))
 REID_REFRESH_INTERVAL = float(os.environ.get("REID_REFRESH_INTERVAL", "15"))
 
@@ -96,6 +101,20 @@ REID_REFRESH_INTERVAL = float(os.environ.get("REID_REFRESH_INTERVAL", "15"))
 # time that track is embedded. Gitignored - this fills up with real
 # footage of people, it never belongs in the repo.
 CROPS_DIR = os.environ.get("CROPS_DIR", "crops")
+
+# Local debug copy of every embedded crop. Off by default: the relay already
+# keeps the crops that matter, and this quietly duplicated every one of them
+# (including all the ones never sent) onto the Pi's SD card.
+SAVE_LOCAL_CROPS = os.environ.get("SAVE_LOCAL_CROPS", "false").lower() in ("1", "true", "yes")
+
+# Which crops are worth sending to the relay at all. A person standing in
+# view produces a crop every embedding cycle (~1/sec) - thousands of near
+# identical images per day per person. These cap that at the source.
+CROP_MIN_HEIGHT = int(os.environ.get("CROP_MIN_HEIGHT", "60"))
+CROP_MIN_WIDTH = int(os.environ.get("CROP_MIN_WIDTH", "25"))
+CROPS_PER_TRACK = int(os.environ.get("CROPS_PER_TRACK", "8"))                    # unrecognised person
+CROPS_PER_TRACK_MATCHED = int(os.environ.get("CROPS_PER_TRACK_MATCHED", "4"))    # already-named person
+CROP_MIN_INTERVAL = float(os.environ.get("CROP_MIN_INTERVAL", "10.0"))            # seconds between crops of one track
 
 # camera_id -> env var holding its RTSP URL
 CAMERA_ENV_MAP = {
@@ -109,7 +128,9 @@ EMBEDDING_INTERVAL = 5       # embed every Nth loop
 STATUS_INTERVAL = 5.0        # seconds between status pushes
 LOG_FLUSH_INTERVAL = 2.0     # seconds between shipping new log lines
 JPEG_QUALITY = 80
-MAX_ALERTS = 100
+MAX_ALERTS = 100             # alerts sent to the relay per update
+ALERT_MEMORY = 500           # alerts kept in memory here (still open to label updates)
+TRACK_STATE_TTL = 3600       # forget a track's bookkeeping after this long unseen
 RECONNECT_DELAY = 3.0
 
 BOX_COLOR = (0, 200, 0)
@@ -162,9 +183,12 @@ class CaptureNode:
         if not self.camera_ids:
             raise RuntimeError("No cameras connected - check RTSP_* env vars")
 
-        logger.info("Loading YOLODetector (%s, imgsz=%s, model=%s)...", INFERENCE_DEVICE, YOLO_IMGSZ, YOLO_MODEL)
+        logger.info(
+            "Loading YOLODetector (%s, imgsz=%s, model=%s, confidence=%s)...",
+            INFERENCE_DEVICE, YOLO_IMGSZ, YOLO_MODEL, YOLO_CONFIDENCE
+        )
         self.detector = YOLODetector(
-            model_name=YOLO_MODEL, confidence=0.3, device=INFERENCE_DEVICE, imgsz=YOLO_IMGSZ
+            model_name=YOLO_MODEL, confidence=YOLO_CONFIDENCE, device=INFERENCE_DEVICE, imgsz=YOLO_IMGSZ
         )
 
         logger.info("Loading OSNetEmbedder (%s)...", INFERENCE_DEVICE)
@@ -173,8 +197,10 @@ class CaptureNode:
         # One tracker per camera - track IDs must never cross feeds
         self.trackers = {cid: ByteTrackAdapter() for cid in self.camera_ids}
 
-        # camera_id -> set of track_ids already alerted on
-        self.seen_track_ids = {cid: set() for cid in self.camera_ids}
+        # camera_id -> {track_id: last_seen_at} for tracks already alerted on.
+        # A dict (not a set) so entries for long-gone tracks can be pruned -
+        # a plain set of every track_id ever seen grew forever.
+        self.seen_track_ids = {cid: {} for cid in self.camera_ids}
 
         self.matcher = IdentityMatcher(
             RELAY_HTTP_URL, RELAY_INGEST_TOKEN,
@@ -183,19 +209,24 @@ class CaptureNode:
         # (camera_id, track_id) -> (person_id, name) once live re-id matches
         self.track_identity = {}
 
-        # (camera_id, track_id) -> alert dict, insertion order tracked
-        # separately so a track matched to a name AFTER its alert already
+        # (camera_id, track_id) -> alert dict, oldest first. Keyed (not just
+        # appended) so a track matched to a name AFTER its alert already
         # fired can have that same alert's label updated in place instead
-        # of leaving it stuck on "Person #<track_id>" forever.
-        self.alerts_by_track = {}
-        self.alert_order = []
+        # of leaving it stuck on "Person #<track_id>" forever. Capped at
+        # ALERT_MEMORY entries - the relay persists the full history in
+        # SQLite, this is just the recent window still open to updates.
+        self.alerts_by_track = collections.OrderedDict()
+
+        # (camera_id, track_id) -> [crops_sent, last_sent_at] - see _should_send_crop
+        self.crop_sent = {}
 
         self.loop_count = 0
         self.started_at = time.time()
 
-        os.makedirs(CROPS_DIR, exist_ok=True)
-        for camera_id in self.camera_ids:
-            os.makedirs(os.path.join(CROPS_DIR, camera_id), exist_ok=True)
+        if SAVE_LOCAL_CROPS:
+            os.makedirs(CROPS_DIR, exist_ok=True)
+            for camera_id in self.camera_ids:
+                os.makedirs(os.path.join(CROPS_DIR, camera_id), exist_ok=True)
 
     def grab_frames(self):
         frames = []
@@ -228,7 +259,8 @@ class CaptureNode:
             non_empty = [tr for tr in tracking_results if tr.tracks]
             if non_empty:
                 embedding_results = self.embedder.extract_batch(non_empty)
-                self.save_crops(embedding_results)
+                if SAVE_LOCAL_CROPS:
+                    self.save_crops(embedding_results)
                 alerts_changed = self._match_identities(embedding_results)
 
         annotated = {}
@@ -240,11 +272,12 @@ class CaptureNode:
             annotated[camera_id] = image
 
             seen = self.seen_track_ids[camera_id]
+            now = time.time()
             for track in tracking_result.tracks:
                 if track.track_id not in seen:
-                    seen.add(track.track_id)
                     alerts_changed = True
                     self._add_alert(camera_id, track.track_id)
+                seen[track.track_id] = now
 
         return annotated, alerts_changed, embedding_results
 
@@ -268,6 +301,7 @@ class CaptureNode:
                     self.track_identity[key] = (person_id, name)
                     if key in self.alerts_by_track:
                         self.alerts_by_track[key]["label"] = name
+                        self.alerts_by_track[key]["person_id"] = person_id
                         changed = True
 
         return changed
@@ -287,21 +321,73 @@ class CaptureNode:
 
     def _add_alert(self, camera_id, track_id):
         key = (camera_id, track_id)
-        _, name = self.track_identity.get(key, (None, None))
+        person_id, name = self.track_identity.get(key, (None, None))
 
         self.alerts_by_track[key] = {
+            # stable id so the relay can upsert this alert into SQLite (and
+            # update its label later) - track_id alone isn't unique across
+            # capture restarts
+            "id": uuid.uuid4().hex,
+            "ts": time.time(),
             "camera_id": camera_id,
-            "person_id": track_id,
+            # track_id is the raw ByteTrack ID (keeps climbing forever,
+            # resets to nothing meaningful - it's NOT a count of people).
+            # person_id is the real identity_store ID, only set once
+            # matched to a known person; null until then.
+            "track_id": track_id,
+            "person_id": person_id,
             "label": name or f"Person #{track_id}",
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
-        self.alert_order.append(key)
+        while len(self.alerts_by_track) > ALERT_MEMORY:
+            self.alerts_by_track.popitem(last=False)
 
     def current_alerts(self):
-        # newest first, capped - self.alert_order only ever grows by
-        # appending, so walking it in reverse is newest-to-oldest
-        ordered = [self.alerts_by_track[k] for k in reversed(self.alert_order) if k in self.alerts_by_track]
-        return ordered[:MAX_ALERTS]
+        # newest first (the OrderedDict is oldest-first), capped
+        return list(reversed(self.alerts_by_track.values()))[:MAX_ALERTS]
+
+    def _should_send_crop(self, camera_id, embedding, now):
+        """Decides whether this crop is worth shipping to the relay. Embedding
+        still runs for every track (that's what drives live re-id and
+        alerts) - this only limits what gets *stored*:
+          - too small to carry identity signal -> skip
+          - per-track cap (lower once the person is already recognised,
+            since we already have plenty of reference crops for them)
+          - minimum gap between two crops of the same track, so the ones
+            kept are spread over time instead of consecutive near-copies"""
+
+        crop_height, crop_width = embedding.crop.shape[:2]
+        if crop_height < CROP_MIN_HEIGHT or crop_width < CROP_MIN_WIDTH:
+            return False
+
+        key = (camera_id, embedding.track_id)
+        matched = key in self.track_identity
+        cap = CROPS_PER_TRACK_MATCHED if matched else CROPS_PER_TRACK
+
+        sent, last_sent_at = self.crop_sent.get(key, (0, 0.0))
+        if sent >= cap or now - last_sent_at < CROP_MIN_INTERVAL:
+            return False
+
+        self.crop_sent[key] = (sent + 1, now)
+        return True
+
+    def _prune_track_state(self, now):
+        """Tracks come and go forever (the ID counter only ever climbs), so
+        every per-track dict has to shed entries for tracks that are gone or
+        it grows without bound. ByteTrack drops a lost track within seconds
+        and never reuses its ID, so an hour of silence means it's dead."""
+
+        for seen in self.seen_track_ids.values():
+            for track_id in [t for t, last in seen.items() if now - last > TRACK_STATE_TTL]:
+                del seen[track_id]
+
+        live = {(cid, tid) for cid, seen in self.seen_track_ids.items() for tid in seen}
+
+        for key in [k for k in self.track_identity if k not in live]:
+            del self.track_identity[key]
+
+        for key in [k for k in self.crop_sent if k not in live]:
+            del self.crop_sent[key]
 
     def save_crops(self, embedding_results):
         for embedding_result in embedding_results:
@@ -357,9 +443,15 @@ class CaptureNode:
                         continue
                     await ws.send(encode_frame_message(camera_id, buf.tobytes()))
 
+                now = time.time()
+                if self.loop_count % 600 == 0:
+                    self._prune_track_state(now)
+
                 for embedding_result in embedding_results:
                     camera_id = embedding_result.frame.camera_id
                     for embedding in embedding_result.embeddings:
+                        if not self._should_send_crop(camera_id, embedding, now):
+                            continue
                         ok, buf = cv2.imencode(
                             ".jpg", embedding.crop, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
                         )

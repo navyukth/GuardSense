@@ -29,7 +29,12 @@ class _CameraReader:
         self.latest_frame = None
         self.running = True
 
+        # A camera that's unreachable at startup (DVR rebooting, cable out)
+        # must not be dropped for good, or take the whole process down - the
+        # read loop below keeps retrying it in the background.
         self.cap = self._open(src)
+        if not self.cap.isOpened():
+            logger.warning("'%s' not reachable yet, will keep retrying in the background", cam_id)
 
         self.thread = threading.Thread(target=self._read_loop, daemon=True)
         self.thread.start()
@@ -37,22 +42,27 @@ class _CameraReader:
     @staticmethod
     def _open(src):
         cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
-
-        if not cap.isOpened():
-            raise Exception(f"Unable to open Camera: {src}")
-
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         return cap
 
     def _reconnect(self):
-        logger.warning("'%s' RTSP connection lost, reconnecting...", self.cam_id)
+        was_up = self.latest_frame is not None
+        if was_up:
+            logger.warning("'%s' RTSP connection lost, reconnecting...", self.cam_id)
+
         self.cap.release()
+
+        # Don't keep serving the last good frame as if it were live.
+        with self.lock:
+            self.latest_frame = None
+
         time.sleep(RECONNECT_DELAY)
-        try:
-            self.cap = self._open(self.src)
+        self.cap = self._open(self.src)
+
+        if self.cap.isOpened():
             logger.info("'%s' reconnected", self.cam_id)
-        except Exception as e:
-            logger.error("'%s' reconnect failed: %s", self.cam_id, e)
+        elif was_up:
+            logger.error("'%s' reconnect failed, will retry", self.cam_id)
 
     def _read_loop(self):
         failures = 0

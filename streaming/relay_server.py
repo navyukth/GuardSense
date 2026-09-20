@@ -10,7 +10,9 @@ Run with:
 """
 
 import asyncio
+import datetime
 import os
+import shutil
 import struct
 import time
 from collections import deque
@@ -33,6 +35,7 @@ from av import VideoFrame
 from streaming.webui import Auth, render_html, render_settings_html
 from streaming.people_ui import render_people_html
 from streaming.logs_ui import render_logs_html
+from streaming.alerts_ui import render_alerts_html
 from streaming import identity_store
 
 
@@ -290,10 +293,16 @@ async def ws_ingest(request):
 
                 camera_id, track_id, embedding, person_id, jpg_bytes = _parse_crop_message(data)
 
-                await asyncio.to_thread(
-                    identity_store.add_crop, camera_id, track_id, jpg_bytes, embedding,
-                    person_id if person_id >= 0 else None
-                )
+                try:
+                    await asyncio.to_thread(
+                        identity_store.add_crop, camera_id, track_id, jpg_bytes, embedding,
+                        person_id if person_id >= 0 else None
+                    )
+                except Exception as e:
+                    # a failed crop write (e.g. DB briefly locked during
+                    # maintenance) must not tear down the whole ingest
+                    # connection that's also carrying the live video
+                    print(f"add_crop failed, dropping this crop: {e}")
 
         elif msg.type == WSMsgType.TEXT:
 
@@ -302,6 +311,10 @@ async def ws_ingest(request):
 
             if payload.get("type") == "alerts":
                 await relay_state.set_alerts(payload["data"])
+                try:
+                    await asyncio.to_thread(identity_store.upsert_alerts, payload["data"])
+                except Exception as e:
+                    print(f"upsert_alerts failed: {e}")
             elif payload.get("type") == "status":
                 await relay_state.set_status(payload["data"])
             elif payload.get("type") == "logs":
@@ -414,9 +427,16 @@ async def api_assign(request):
         if not name or not name.strip():
             raise web.HTTPBadRequest(text="name required for a new person")
         person_id = await asyncio.to_thread(identity_store.create_person, name.strip())
+        target = f'new person "{name.strip()}" (id {person_id})'
+    else:
+        target = await _person_label(person_id)
 
     await asyncio.to_thread(
         identity_store.assign_group_to_person, session_key, person_id, exclude_crop_ids
+    )
+    await audit(
+        request, "assign",
+        f"sighting {session_key} -> {target}, {len(exclude_crop_ids)} crop(s) excluded/deleted"
     )
     return web.json_response({"person_id": person_id})
 
@@ -427,34 +447,192 @@ async def api_merge(request):
     into_id = int(body["into_id"])
     exclude_crop_ids = body.get("exclude_crop_ids", [])
 
+    from_label = await _person_label(from_id)
+    into_label = await _person_label(into_id)
+
     await asyncio.to_thread(identity_store.merge_persons, from_id, into_id, exclude_crop_ids)
+    await audit(
+        request, "merge",
+        f"{from_label} merged into {into_label}, {len(exclude_crop_ids)} crop(s) excluded/deleted"
+    )
     return web.json_response({"person_id": into_id})
 
 
 async def api_delete_group(request):
     session_key = request.match_info["session_key"]
     await asyncio.to_thread(identity_store.delete_group, session_key)
+    await audit(request, "delete_sighting", f"unlabeled sighting {session_key}")
     return web.json_response({"ok": True})
+
+
+async def api_bulk_delete_groups(request):
+    body = await request.json()
+    session_keys = body.get("session_keys", [])
+    deleted = await asyncio.to_thread(identity_store.delete_groups, session_keys)
+    await audit(
+        request, "bulk_delete_sightings",
+        f"{len(session_keys)} unlabeled sighting(s), {deleted} crop(s) deleted"
+    )
+    return web.json_response({"ok": True, "deleted_crops": deleted})
 
 
 async def api_delete_person(request):
     person_id = int(request.match_info["person_id"])
-    await asyncio.to_thread(identity_store.delete_person, person_id)
+    label = await _person_label(person_id)
+    deleted = await asyncio.to_thread(identity_store.delete_person, person_id)
+    await audit(request, "delete_person", f"{label} and {deleted} crop(s)")
     return web.json_response({"ok": True})
+
+
+async def api_move_crops(request):
+    body = await request.json()
+    crop_ids = body["crop_ids"]
+
+    new_name = (body.get("new_person_name") or "").strip()
+    if new_name:
+        to_person_id = await asyncio.to_thread(identity_store.create_person, new_name)
+        target = f'new person "{new_name}" (id {to_person_id})'
+    else:
+        to_person_id = int(body["to_person_id"])
+        target = await _person_label(to_person_id)
+
+    await asyncio.to_thread(identity_store.move_crops, crop_ids, to_person_id)
+    await audit(request, "move_crops", f"{len(crop_ids)} crop(s) -> {target}")
+    return web.json_response({"ok": True, "person_id": to_person_id})
+
+
+async def api_bulk_delete_crops(request):
+    body = await request.json()
+    crop_ids = body.get("crop_ids", [])
+    deleted = await asyncio.to_thread(identity_store.delete_crops_bulk, crop_ids)
+    await audit(request, "delete_crops", f"{deleted} crop(s)")
+    return web.json_response({"ok": True, "deleted": deleted})
 
 
 async def api_delete_crop(request):
     crop_id = int(request.match_info["crop_id"])
     await asyncio.to_thread(identity_store.delete_crop, crop_id)
+    await audit(request, "delete_crop", f"crop {crop_id}")
     return web.json_response({"ok": True})
 
 
+async def _person_label(person_id):
+    person = await asyncio.to_thread(identity_store.get_person, person_id)
+    name = person["name"] if person else "?"
+    return f'"{name}" (id {person_id})'
+
+
+async def audit(request, action, detail):
+    """Records an admin-UI action: printed (docker logs), shown on the Logs
+    page, and stored in the audit_log table so it survives restarts.
+    Answers 'who deleted my crops, and when?' after the fact."""
+
+    remote = request.headers.get("X-Forwarded-For") or request.remote or "?"
+    now = time.time()
+
+    print(f"AUDIT {action}: {detail} (from {remote})")
+
+    await relay_state.add_logs([{
+        "level": "AUDIT",
+        "message": f"audit: {action} - {detail} (from {remote})",
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
+    }])
+
+    try:
+        await asyncio.to_thread(identity_store.add_audit, now, action, detail, remote)
+    except Exception as e:
+        print(f"audit_log write failed: {e}")
+
+
+def _day_range(date_str):
+    """'YYYY-MM-DD' -> (start_ts, end_ts) in the server's local timezone."""
+    day = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+    start = day.timestamp()
+    return start, (day + datetime.timedelta(days=1)).timestamp()
+
+
 async def alerts(request):
-    return web.json_response({"alerts": relay_state.alerts})
+    """Latest alerts, or a day's worth: /api/alerts?date=2026-09-20&camera=front_gate&limit=500"""
+
+    try:
+        limit = max(1, min(int(request.query.get("limit", "100")), 2000))
+    except ValueError:
+        raise web.HTTPBadRequest(text="bad limit")
+
+    since_ts = until_ts = None
+    date_str = request.query.get("date")
+    if date_str:
+        try:
+            since_ts, until_ts = _day_range(date_str)
+        except ValueError:
+            raise web.HTTPBadRequest(text="date must be YYYY-MM-DD")
+
+    result = await asyncio.to_thread(
+        identity_store.list_alerts, limit, since_ts, until_ts, request.query.get("camera") or None
+    )
+    return web.json_response({"alerts": result})
+
+
+async def audit_log_api(request):
+    entries = await asyncio.to_thread(identity_store.list_audit, 200)
+    return web.json_response({"audit": entries})
+
+
+async def alerts_page(request):
+    return web.Response(text=render_alerts_html(CAMERA_IDS), content_type="text/html")
 
 
 async def logs(request):
     return web.json_response({"logs": await relay_state.get_logs()})
+
+
+STORAGE_CACHE_SECONDS = 60
+_storage_cache = {"at": 0.0, "data": None}
+
+
+def get_storage_info():
+    """Disk usage of the Pi's filesystem (via the mounted data dir) plus
+    how much of it GuardSense's own crops + DB take up. Walking ~30k crop
+    files is slow-ish, so the result is cached for a minute - /api/status
+    gets polled every few seconds by every open browser tab."""
+
+    now = time.time()
+    if _storage_cache["data"] is not None and now - _storage_cache["at"] < STORAGE_CACHE_SECONDS:
+        return _storage_cache["data"]
+
+    crops_bytes = 0
+    crops_count = 0
+    try:
+        with os.scandir(identity_store.CROPS_DIR) as it:
+            for entry in it:
+                if entry.is_file():
+                    crops_bytes += entry.stat().st_size
+                    crops_count += 1
+    except OSError:
+        pass
+
+    try:
+        db_bytes = os.path.getsize(identity_store.DB_PATH)
+    except OSError:
+        db_bytes = 0
+
+    try:
+        usage = shutil.disk_usage(os.path.dirname(os.path.abspath(identity_store.DB_PATH)))
+        disk = {"total": usage.total, "used": usage.used, "free": usage.free}
+    except OSError:
+        disk = {"total": None, "used": None, "free": None}
+
+    data = {
+        "disk_total": disk["total"],
+        "disk_used": disk["used"],
+        "disk_free": disk["free"],
+        "crops_bytes": crops_bytes,
+        "crops_count": crops_count,
+        "db_bytes": db_bytes,
+    }
+    _storage_cache["at"] = now
+    _storage_cache["data"] = data
+    return data
 
 
 async def status(request):
@@ -475,6 +653,7 @@ async def status(request):
         "active_connections": len(pcs),
         "capture_node_connected": capture_connected,
         "capture_loop_count": relay_state.capture_status.get("loop_count"),
+        "storage": await asyncio.to_thread(get_storage_info),
     }
 
     return web.json_response(merged)
@@ -515,6 +694,46 @@ async def offer(request):
     })
 
 
+# =========================================================
+# Retention - see identity_store.run_retention
+# =========================================================
+
+UNASSIGNED_RETENTION_HOURS = float(os.environ.get("UNASSIGNED_RETENTION_HOURS", "48"))
+PERSON_MAX_CROPS = int(os.environ.get("PERSON_MAX_CROPS", "300"))
+PERSON_MIN_SIMILARITY = float(os.environ.get("PERSON_MIN_SIMILARITY", "0.45"))
+RETENTION_INTERVAL_SECONDS = float(os.environ.get("RETENTION_INTERVAL_SECONDS", "3600"))
+ALERT_RETENTION_DAYS = float(os.environ.get("ALERT_RETENTION_DAYS", "30"))
+
+
+async def retention_loop():
+    await asyncio.sleep(30)  # let the server come up first
+
+    while True:
+        try:
+            result = await asyncio.to_thread(
+                identity_store.run_retention,
+                UNASSIGNED_RETENTION_HOURS * 3600,
+                PERSON_MAX_CROPS,
+                PERSON_MIN_SIMILARITY,
+                ALERT_RETENTION_DAYS,
+            )
+            print(f"Retention pass done: {result}")
+        except Exception as e:
+            print(f"Retention pass failed: {e}")
+
+        await asyncio.sleep(RETENTION_INTERVAL_SECONDS)
+
+
+async def start_retention(app):
+    app["retention_task"] = asyncio.create_task(retention_loop())
+
+
+async def stop_retention(app):
+    task = app.get("retention_task")
+    if task:
+        task.cancel()
+
+
 async def shutdown(app):
 
     await asyncio.gather(
@@ -537,6 +756,8 @@ app.router.add_get("/logout", auth.logout)
 app.router.add_get("/settings", settings_page)
 app.router.add_get("/people", people_page)
 app.router.add_get("/logs", logs_page)
+app.router.add_get("/alerts", alerts_page)
+app.router.add_get("/api/audit", audit_log_api)
 app.router.add_get("/crop-image/{filename}", crop_image)
 app.router.add_get("/api/cameras", cameras)
 app.router.add_get("/api/logs", logs)
@@ -548,7 +769,10 @@ app.router.add_get("/api/people/{person_id}/crops", api_person_crops)
 app.router.add_post("/api/people/assign", api_assign)
 app.router.add_post("/api/people/merge", api_merge)
 app.router.add_delete("/api/people/group/{session_key}", api_delete_group)
+app.router.add_post("/api/people/unassigned/bulk-delete", api_bulk_delete_groups)
 app.router.add_delete("/api/people/{person_id}", api_delete_person)
+app.router.add_post("/api/crops/move", api_move_crops)
+app.router.add_post("/api/crops/bulk-delete", api_bulk_delete_crops)
 app.router.add_delete("/api/crops/{crop_id}", api_delete_crop)
 app.router.add_get("/api/alerts", alerts)
 app.router.add_get("/api/status", status)
@@ -556,6 +780,8 @@ app.router.add_post("/offer", offer)
 app.router.add_get("/ws/ingest", ws_ingest)
 
 app.on_shutdown.append(shutdown)
+app.on_startup.append(start_retention)
+app.on_cleanup.append(stop_retention)
 
 
 if __name__ == "__main__":

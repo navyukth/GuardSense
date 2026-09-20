@@ -67,6 +67,7 @@ a#back:hover { color: white; border-color: #777; }
 .lvl-WARNING { color: #fc6; }
 .lvl-ERROR { color: #f66; }
 .lvl-DEBUG { color: #888; }
+.lvl-AUDIT { color: #6cf; }
 .empty { color: #666; }
 </style>
 </head>

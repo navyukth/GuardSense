@@ -1,0 +1,52 @@
+name: Deploy to Pi5
+
+# Push to main -> syntax-check on a GitHub-hosted runner -> deploy on the Pi5's
+# self-hosted runner (which rebuilds only the container(s) whose files changed).
+#
+# Deliberately NOT triggered by pull_request: a self-hosted runner executes
+# whatever the workflow says, on your Pi, so it must never run code from a
+# fork's PR.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "sample-imgs/**"
+      - "architecture-imgs/**"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild both containers even if nothing changed"
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-pi5
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile every module
+        run: python -m compileall -q camera detection tracking embedding DataClass streaming
+      - name: Shell script syntax
+        run: bash -n deploy/deploy.sh && bash -n deploy/setup-runner.sh
+
+  deploy:
+    name: Deploy
+    needs: check
+    runs-on: [self-hosted, pi5]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sync files and rebuild what changed
+        env:
+          FORCE: ${{ inputs.force && '1' || '0' }}
+        run: bash deploy/deploy.sh

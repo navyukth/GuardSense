@@ -1,0 +1,5 @@
+# Shell scripts run on Linux - never let Windows checkouts turn them into CRLF.
+*.sh text eol=lf
+*.yml text eol=lf
+Dockerfile text eol=lf
+*.Dockerfile text eol=lf

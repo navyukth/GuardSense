@@ -179,6 +179,7 @@ button.active {
 
 <div id="topbar">
     <h1>GuardSense Live</h1>
+    <a id="logout" href="/alerts">History</a>
     <a id="logout" href="/people">People</a>
     <a id="logout" href="/logs">Logs</a>
     <a id="logout" href="/settings">Settings</a>
@@ -399,6 +400,18 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+function formatBytes(bytes) {
+    if (bytes == null) return "-";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let value = bytes;
+    let i = 0;
+    while (value >= 1024 && i < units.length - 1) {
+        value /= 1024;
+        i++;
+    }
+    return value.toFixed(i === 0 ? 0 : 1) + " " + units[i];
+}
+
 async function refreshAlerts() {
 
     const el = document.getElementById("alerts");
@@ -414,7 +427,7 @@ async function refreshAlerts() {
         }
 
         el.innerHTML = data.alerts.map((a) => {
-            const who = a.label || ("Person #" + a.person_id);
+            const who = a.label || ("Person #" + a.track_id);
             return (
                 '<div class="alert-row">' +
                 "<span>" + escapeHtml(who) + " — " + escapeHtml(a.camera_id) + "</span>" +
@@ -444,6 +457,17 @@ async function refreshServerInfo() {
             ["Uptime", data.uptime_human],
             ["Viewers", data.active_connections],
         ];
+
+        const s = data.storage;
+        if (s && s.disk_total) {
+            const pct = Math.round((s.disk_used / s.disk_total) * 100);
+            rows.push(
+                ["Pi storage", formatBytes(s.disk_used) + " / " + formatBytes(s.disk_total) + " (" + pct + "%)"],
+                ["Free", formatBytes(s.disk_free)],
+                ["GuardSense data", formatBytes(s.crops_bytes + s.db_bytes) +
+                    " (" + s.crops_count + " crops)"],
+            );
+        }
 
         el.innerHTML = rows.map(([label, value]) =>
             '<div class="status-row"><span>' + escapeHtml(label) + '</span><span>' +

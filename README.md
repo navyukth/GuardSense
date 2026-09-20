@@ -83,6 +83,11 @@ credentials, and tokens. Key settings:
 | `RELAY_INGEST_TOKEN` | Shared secret between capture and relay |
 | `ADMIN_PASSWORD` | Web UI login |
 | `REID_MATCH_THRESHOLD` | Cosine similarity cutoff for live re-id matches |
+| `YOLO_CONFIDENCE` | Min detection confidence (default 0.5) - lower = more false positives |
+| `CROP_MIN_INTERVAL` / `CROPS_PER_TRACK` / `CROPS_PER_TRACK_MATCHED` | How often / how many crops are sent per person (defaults 10 s / 8 / 4) |
+| `SAVE_LOCAL_CROPS` | Keep a duplicate copy of crops on the capture host (default off) |
+| `UNASSIGNED_RETENTION_HOURS` / `PERSON_MAX_CROPS` / `ALERT_RETENTION_DAYS` | Relay retention: purge unnamed crops after N hours (48), keep best N crops per person (300), keep alerts N days (30) |
+| `TZ` | Set in each service's docker-compose `environment:` (e.g. `Asia/Kolkata`) - containers default to UTC |
 
 ### 2. Run locally (dev)
 
@@ -98,7 +103,14 @@ Open `http://localhost:8080`, log in with `ADMIN_PASSWORD`.
 
 ### 3. Deploy on the Pi5 (production)
 
-Both services build from `streaming/`:
+**Automatic:** pushing to `main` deploys - a self-hosted GitHub Actions runner
+on the Pi runs `deploy/deploy.sh`, which rebuilds only the container(s) whose
+files changed. One-time runner setup is in
+[`PI5_DEPLOYMENT.md`](PI5_DEPLOYMENT.md). You can also run it by hand:
+`bash deploy/deploy.sh` (`DRY_RUN=1` to preview, `FORCE=1` to rebuild both).
+
+**Manual** (what the script does under the hood). Both services build from
+`streaming/`:
 
 ```bash
 # relay
@@ -114,10 +126,17 @@ build do it) - NCNN meaningfully outperforms plain PyTorch on ARM CPUs.
 
 ## Web UI
 
-- **`/`** - live feed, one camera at a time
-- **`/people`** - review unlabeled ByteTrack sightings, name them or merge
-  into an existing person (with a crop-review popup to drop outliers
-  before merging), delete individual crops or whole people
+- **`/`** - live feed, one camera at a time, alerts, and server status
+  (including Pi disk usage)
+- **`/alerts`** (History) - alerts for any day, filter by camera/person;
+  stored in SQLite so they survive restarts
+- **`/people`** - review unlabeled ByteTrack sightings: bulk select/delete,
+  name them or merge into an existing person (two-section review popup:
+  existing vs incoming crops), click any crop to enlarge, open a person's
+  full gallery to multi-select crops and delete or move them, and
+  long-press-and-drag to select several photos at once
+- **Retention:** unnamed crops are purged after 48 h and each named
+  person is trimmed to their best 300 crops, hourly
 - **`/logs`** - live capture-node log stream
 - **`/settings`** - admin password / TURN credential / ingest token
   (masked, reveal on click), configured cameras
