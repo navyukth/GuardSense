@@ -13,6 +13,10 @@
 #
 set -euo pipefail
 
+# SUDO can be overridden (e.g. SUDO="sudo -S" to feed the password on stdin
+# when running over a non-interactive SSH session).
+SUDO="${SUDO:-sudo}"
+
 REPO="${1:?usage: setup-runner.sh <owner>/<repo> <registration-token>}"
 TOKEN="${2:?usage: setup-runner.sh <owner>/<repo> <registration-token>}"
 RUNNER_DIR="$HOME/actions-runner"
@@ -31,8 +35,11 @@ fi
 mkdir -p "$RUNNER_DIR"
 cd "$RUNNER_DIR"
 
-VERSION="$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest \
-    | grep -m1 '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')"
+# Fetch the whole response first: piping curl straight into `grep -m1` makes
+# grep exit early, curl fails with "(23) Failure writing output", and
+# `pipefail` then aborts the script.
+RELEASE_JSON="$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest)"
+VERSION="$(printf '%s' "$RELEASE_JSON" | grep -m1 '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')"
 echo "installing actions runner v$VERSION ($ARCH)"
 
 curl -fsSL -o runner.tar.gz \
@@ -46,8 +53,8 @@ rm runner.tar.gz
     --name pi5 \
     --labels pi5
 
-sudo ./svc.sh install "$USER"
-sudo ./svc.sh start
-sudo ./svc.sh status | head -5
+$SUDO ./svc.sh install "$USER"
+$SUDO ./svc.sh start
+$SUDO ./svc.sh status | head -5
 
 echo "runner installed - it should show as 'Idle' under Settings -> Actions -> Runners"
