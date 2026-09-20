@@ -210,6 +210,18 @@ approval for outside collaborators*.
 **Rolling back:** `git revert <bad-commit>` and push - that redeploys the old
 code. There's no automatic rollback.
 
+**Checking on it / debugging:**
+```bash
+systemctl status actions.runner.<owner>-<repo>.pi5.service     # is the runner alive?
+journalctl -u actions.runner.<owner>-<repo>.pi5.service -f     # its live log
+docker ps ; docker logs --tail 50 guardsense-capture            # what's running
+```
+The full output of each deploy (including Docker build logs) is on GitHub:
+repo -> **Actions** -> the run -> the `Deploy` job. A job stuck **Queued** means
+the runner is offline or lacks the `pi5` label. The complete runbook -
+failure-mode table, re-registering/removing the runner, and what went wrong
+while building it - is in `Explanation.md` §28.
+
 ## 8. Quick commands
 
 ```bash

@@ -225,8 +225,9 @@ Pushing to `main` deploys to the Pi5 automatically:
    that changed**, then health-checks them.
 
 `.env` files, `data/` and the model weights stay on the Pi and are never
-overwritten. Details and reasoning: `Explanation.md` §22; setup steps:
-`PI5_DEPLOYMENT.md`.
+overwritten. Reasoning: `Explanation.md` §22. Step-by-step runbook (setup
+commands, day-to-day commands, debugging, failure-mode table, removing the
+runner): `Explanation.md` §28. Short setup version: `PI5_DEPLOYMENT.md`.
 
 ## Where the pipeline runs (and why that changed)
 

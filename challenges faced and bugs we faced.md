@@ -573,7 +573,31 @@ relay stayed up untouched, and the health check passed; pushing `aab3d50`
 (scripts only) was a ~7-second no-op. That is the selective-rebuild design
 working as intended.
 
-## 35. The shell-quoting problem, again
+## 35. I corrupted a document with a "harmless" scripted edit
+
+**What happened:** to swap a real-looking password in an example command for a
+placeholder, I ran `Get-Content Explanation.md -Raw` and wrote the result
+back with `[IO.File]::WriteAllText`. Windows PowerShell 5.1 reads a file with
+no BOM as **ANSI (cp1252)**, not UTF-8, so every multi-byte character was
+decoded wrongly, then re-encoded as UTF-8: each em-dash (`—`) became `â€”`.
+62 places, and the damage was already in a local commit.
+
+**How it was caught:** a tool notification showed the file's new contents with
+the garbled characters; a search for `â€` confirmed it was only that one file.
+
+**Fix:** reversed it exactly rather than retyping - read the file as UTF-8,
+re-encode that text back to its original bytes with cp1252, decode those bytes
+as UTF-8, write it back. Verified 0 garbled sequences and 61 real em-dashes,
+amended the (unpushed) commit, and only then pushed.
+
+**Lessons:** don't round-trip a UTF-8 file through PowerShell 5.1's default
+encodings; make text edits with the editor tool or with explicit
+`-Encoding UTF8` / `ReadAllText(path, UTF8)`; always `git diff` after a
+scripted edit; and it's another reason to commit *before* pushing so a mistake
+is still local and fixable. (Also: `Set-Content -Encoding UTF8` in 5.1 writes a
+BOM.)
+
+## 36. The shell-quoting problem, again
 
 Two more test commands failed purely because of PowerShell/ssh/bash quoting
 (a `/dev/tcp` redirect and a JSON body with escaped quotes) — and one produced

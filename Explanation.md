@@ -651,7 +651,152 @@ served as if it were live. (`.140` vs `.141` - the DVR was simply off; checked
 by opening a TCP socket to port 554 from the Pi, not by ping, since a camera
 port can answer while ICMP is filtered.)
 
-## 28. Commands used throughout (reference)
+## 28. CI/CD runbook: how we deployed it, the commands, and how to debug it
+
+§22 explains *why* the pipeline is shaped the way it is. This section is the
+*how*: what was actually run, and what to do when it breaks.
+
+### 28.1 The pieces
+
+| Piece | Where | Purpose |
+|---|---|---|
+| `.github/workflows/deploy.yml` | repo | Defines the two jobs: `check` (GitHub-hosted) then `deploy` (Pi) |
+| `deploy/deploy.sh` | repo | The actual deploy: sync changed files, rebuild what changed, health-check |
+| `deploy/setup-runner.sh` | repo | One-time: installs + registers the runner on the Pi |
+| `~/actions-runner/` | Pi | The runner program (listener + worker), its config and logs |
+| `~/actions-runner/_work/GuardSense/GuardSense/` | Pi | The runner's fresh checkout of the commit being deployed |
+| `~/npm/guardsense-relay/`, `~/npm/guardsense-capture/` | Pi | The folders the images are actually built from (not a git checkout) |
+| systemd unit `actions.runner.<owner>-<repo>.pi5.service` | Pi | Keeps the runner alive across reboots |
+
+The flow: `git push` -> GitHub sees a push to `main` (docs-only changes are
+ignored) -> `check` job compiles the code on a GitHub-hosted machine -> `deploy`
+job is handed to **our** runner (label `pi5`) -> it checks out the commit ->
+`bash deploy/deploy.sh` -> containers rebuilt -> health check -> green or red.
+
+### 28.2 Setting it up (what we ran, in order)
+
+1. **Get a registration token.** GitHub repo -> Settings -> Actions -> Runners
+   -> *New self-hosted runner* -> Linux / ARM64. Copy the token from the
+   `./config.sh --url ... --token XXXX` line. It is single-use and expires in
+   about an hour; it only lets a runner register, it isn't a login credential.
+2. **Copy the script to the Pi and run it:**
+   ```bash
+   scp deploy/setup-runner.sh nunna@<pi-ip>:/tmp/
+   ssh nunna@<pi-ip>
+   bash /tmp/setup-runner.sh navyukth/GuardSense <registration-token>
+   ```
+   (Over a non-interactive SSH session there's no terminal for the `sudo`
+   password, so we ran it as
+   `printf '<pw>\n<pw>\n<pw>\n' | SUDO='sudo -S' bash setup-runner.sh <owner>/<repo> <token>`.)
+   The script downloads the latest `actions-runner-linux-arm64`, runs
+   `./config.sh --unattended --replace --name pi5 --labels pi5`, then
+   `sudo ./svc.sh install <user>` and `sudo ./svc.sh start`.
+3. **Check it registered:** GitHub -> Settings -> Actions -> Runners should show
+   `pi5` as **Idle** (green). On the Pi:
+   ```bash
+   systemctl status actions.runner.navyukth-GuardSense.pi5.service
+   ```
+4. **Prerequisites that must already be true on the Pi:** the runner user is in
+   the `docker` group (`id` lists `docker`), `rsync` and `git` are installed, the
+   two service folders exist and each already contains its `.env`, and
+   `~/npm/guardsense-capture/yolov8n.pt` exists (the weights are gitignored).
+5. **Dry-run first** (changes nothing) against a copy of the repo:
+   `DRY_RUN=1 bash deploy/deploy.sh`. It printed the relay as unchanged - proof
+   the file mapping matched what was live - and one real difference.
+6. **Push.** A job queued *before* the runner existed just waits (GitHub keeps
+   queued jobs for up to 24 h), so the moment the runner registered it picked up
+   the earlier push and deployed it. Then a scripts-only push confirmed the
+   no-op path (~7 s, nothing rebuilt).
+
+### 28.3 Day-to-day commands
+
+```bash
+# --- from your laptop ---
+git push origin main                    # deploys (unless the change is docs-only)
+# GitHub -> Actions tab -> "Deploy to Pi5" -> Run workflow (tick "force" to rebuild both)
+
+# --- on the Pi ---
+bash deploy/deploy.sh                   # deploy what changed, by hand
+DRY_RUN=1 bash deploy/deploy.sh         # preview only - modifies nothing
+FORCE=1   bash deploy/deploy.sh         # rebuild both containers regardless
+
+docker ps                               # are both containers up?
+docker logs --tail 50 guardsense-capture
+docker logs --tail 50 guardsense-relay
+docker inspect -f '{{.State.Running}} {{.RestartCount}}' guardsense-capture
+```
+
+Roll back a bad deploy: `git revert <bad-commit>` then `git push` - that
+redeploys the previous code. There is deliberately no automatic rollback.
+
+### 28.4 Where to look when something's wrong
+
+| Question | Look here |
+|---|---|
+| Did my push deploy? What happened? | GitHub -> **Actions** tab -> the run -> click the `Deploy` job; the full `[deploy] ...` output and any Docker build log is there |
+| Is the runner alive? | `systemctl status actions.runner.navyukth-GuardSense.pi5.service`; live log: `journalctl -u actions.runner.navyukth-GuardSense.pi5.service -f` |
+| Runner-side details for a job | `~/actions-runner/_diag/Runner_*.log` (the listener) and `Worker_*.log` (one per job - search for `Job result`) |
+| What did the runner check out? | `git -C ~/actions-runner/_work/GuardSense/GuardSense log --oneline -1` |
+| What's actually running on the Pi? | `docker ps`, `docker logs <container>` |
+
+Note the per-step output lives in the GitHub Actions UI; the runner's
+`_diag/pages/` copies are deleted when the job ends, so don't rely on them
+after the fact.
+
+### 28.5 Failure modes and fixes
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `deploy` job sits **Queued** forever | Runner offline, or no runner has the `pi5` label | `systemctl status` the service, `sudo systemctl restart` it; check the Runners page shows it *Idle* and labelled `pi5` |
+| Runner shows **Offline** in GitHub | Service stopped, Pi rebooted without the unit enabled, or no internet | `sudo systemctl enable --now actions.runner...service`; check the Pi's connectivity |
+| `check` job fails | A syntax error (caught before the Pi is touched - working as intended) | Fix the error the log names and push again |
+| Deploy red: `relay: NOT answering on :8080` | Relay crashed on start (bad code/config) | The job log already dumps `docker logs --tail 30`; fix and push, or `git revert` |
+| Deploy red: `capture: NOT running` | Capture exited (models, cameras, config) | Same; also `docker logs guardsense-capture` |
+| `permission denied ... docker.sock` | Runner user isn't in the `docker` group | `sudo usermod -aG docker <user>`, then restart the runner service (group changes need a new session) |
+| `ERROR: <folder> doesn't exist` | A service folder was never created | Create it and put its `.env` there first |
+| Build fails: `COPY yolov8n.pt` not found | Weights are gitignored, so they must already be on the Pi | Put `yolov8n.pt` in `~/npm/guardsense-capture/` |
+| Deploy rebuilds **both** every push | File comparison is timestamp-based somewhere | It should compare content (`cmp`, `rsync -c`); check you haven't edited `deploy.sh` to use `-t`/mtimes |
+| `bash: ...\r: command not found` | A script got CRLF line endings on Windows | `.gitattributes` forces LF; re-checkout, or `dos2unix` |
+| Build very slow (~5 min) | `requirements.txt` or a Dockerfile changed, invalidating the cache | Expected; or the build cache was pruned (§20) |
+| `no space left on device` during build | Docker build cache filled the SD card | `docker builder prune -f` (§20) |
+| Registration: `Http response code: NotFound` | Token expired or already used | Generate a new token on the Runners page |
+
+### 28.6 Re-registering or removing the runner
+
+```bash
+cd ~/actions-runner
+sudo ./svc.sh stop && sudo ./svc.sh uninstall
+./config.sh remove --token <removal-token>     # token from GitHub's Runners page -> the runner -> Remove
+cd ~ && rm -rf actions-runner
+# then run deploy/setup-runner.sh again with a fresh registration token
+```
+(`setup-runner.sh` refuses to run if `~/actions-runner/.runner` already exists,
+so a half-configured runner has to be removed first.)
+
+### 28.7 What went wrong building it (and what to remember)
+
+- **`curl | grep -m1` under `pipefail`** aborted the setup script on its very
+  first run (`grep` exits early, `curl` errors writing to the closed pipe).
+  Capture the output in a variable first.
+- **No terminal for `sudo` over SSH** - hence the overridable `SUDO` variable.
+- **PowerShell quoting** broke most of my monitoring one-liners (`$(seq ...)`
+  expanded locally, `/dev/tcp` treated as a path). Every check became a small
+  script copied to the Pi and run there.
+- **A monitoring script looked for log files the runner had already deleted**
+  and spewed errors - the deploy itself was fine. Trust the GitHub Actions UI
+  and `docker ps`, not scraped runner internals.
+- **I corrupted a doc while "fixing" it.** Swapping a password for a
+  placeholder using PowerShell's `Get-Content`/`Set-Content` re-encoded the
+  UTF-8 file as if it were ANSI, turning every em-dash into `â€”` (62 places).
+  It was caught before pushing and reversed exactly by re-encoding the bytes.
+  Lesson: never round-trip a UTF-8 file through PowerShell 5.1's default
+  encodings - use the editor tool, or pass `-Encoding UTF8` and read with
+  `[IO.File]::ReadAllText(path, UTF8)` - and always `git diff` after a scripted
+  edit. (Also: `Set-Content -Encoding UTF8` in 5.1 adds a BOM.)
+- **Security decision, not a bug:** no `pull_request` trigger, because a
+  self-hosted runner executes the workflow on your own hardware.
+
+## 29. Commands used throughout (reference)
 
 Local dev / laptop:
 ```bash
