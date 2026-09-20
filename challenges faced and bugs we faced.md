@@ -557,6 +557,22 @@ thing I depend on isn't up yet" as a normal state, not a crash.
   let anyone's fork run code on the Pi. The workflow triggers only on pushes to
   `main`.
 
+- **`curl ... | grep -m1` under `set -o pipefail`.** The runner setup script
+  looked up the latest runner version with `curl -fsSL <api> | grep -m1
+  '"tag_name"'`. `grep -m1` exits after the first match, `curl` then fails
+  writing to the closed pipe (`(23) Failure writing output`), and `pipefail`
+  turns that harmless error into a fatal one. Found on the first real run.
+  Fix: capture the response into a variable first, then grep the variable.
+- **`sudo` has no terminal over SSH.** The script's `sudo ./svc.sh install`
+  can't prompt for a password in a non-interactive session, so the sudo
+  command is now overridable (`SUDO="sudo -S"`, password fed on stdin).
+
+**First live results:** with the runner registered, pushing `9033f3c`
+rebuilt only the capture container (its requirements had changed) while the
+relay stayed up untouched, and the health check passed; pushing `aab3d50`
+(scripts only) was a ~7-second no-op. That is the selective-rebuild design
+working as intended.
+
 ## 35. The shell-quoting problem, again
 
 Two more test commands failed purely because of PowerShell/ssh/bash quoting
